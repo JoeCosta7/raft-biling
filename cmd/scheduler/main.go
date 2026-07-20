@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
 	"raft-biling/internal/config"
 	"raft-biling/internal/node"
+	"syscall"
+	"time"
 )
 
 //All config flags
@@ -18,72 +23,38 @@ import (
   --bootstrap
 */
 
-// Returns a channel on which to recieved specified signals
-// func HandleSignals(sigs ...os.Signal) <-chan os.Signal {
-// 	//register interest in SIGINT & SIGTERM to keep track of those evil evil commands and get back a channel
-// 	sigCh := make(chan os.Signal, 2)
-// 	signal.Nofify(sigCh, sigs...)
-// 	for {
-// 		sig := <-sigCh
-// 		log.Printf(`received signal "%s"`, sig.String())
-// 		ch <- sig
-// 	}
-// 	return ch
-// }
-
-// // CreateContext creates a context which is canceled if signals are recieved on the given channel
-// func CreateContext(ch <-chan os.Signal) (context.Context, context.CancelFunc) {
-// 	ctx, cancel := context.WithCancel(context.Background())
-// 	go func() {
-// 		<-ch
-// 		cancel()
-// 	}()
-// 	return ctx, cancel
-// }
-
 func main() {
-	// sigCh := HandleSignals(syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	// mainContext, _ := CreateContext(sigCh)
 
+	//creates config with cli args
 	cfg, err := config.New(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	fmt.Printf("config: %+v\n", cfg)
+	//builds node from config
 	n, err := node.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	fmt.Printf("node constructed: %+v\n", n)
-	// stMach, err := statemachine.New(cfg*config.Config)(*StateMachine, error)
-	// if err != nil {
-	// 	log.Fatalf("failed to create state machine: %s", err.Error())
-	// }
-	// raftNode, err := raftnode.New(cfg*config.Config, sm*statemachine.StateMachine)(*RaftNode, error)
-	// if err != nil {
-	// 	log.Fatalf("failed to create raft node: %s", err.Error())
-	// }
-	// callback, err := callback.New(cfg*config.Config) * Callback
-	// if err != nil {
-	// 	log.Fatalf("failed to create callback: %s", err.Error())
-	// }
-	// scheduler, err := scheduler.New(rn*raftnode.RaftNode, sm*statemachine.StateMachine, cb*callback.Callback) * Scheduler
-	// if err != nil {
-	// 	log.Fatalf("failed to create store: %s", err.Error())
-	// }
-	// api, err := api.New(cfg*config.Config, rn*raftnode.RaftNode, sm*statemachine.StateMachine) * API
-	// if err != nil {
-	// 	log.Fatalf("failed to create api: %s", err.Error())
-	// }
-	// node := Node{
-	// 	cfg:          cfg,
-	// 	raftNode:     raftNode,
-	// 	stateMachine: stMach,
-	// 	api:          api,
-	// 	scheduler:    scheduler,
-	// 	callback:     callback,
-	// }
+	// runtime context for detecting e.g. Ctrl + C
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
+	if err := n.Start(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("scheduler ready on %s\n", cfg.HTTPAddr)
+
+	<-ctx.Done()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	log.Println("shutting down")
+	if err := n.Shutdown(shutdownCtx); err != nil {
+		log.Println(err)
+	}
 }

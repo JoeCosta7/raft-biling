@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"raft-biling/internal/api"
 	"raft-biling/internal/callback"
@@ -37,10 +38,18 @@ func New(cfg *config.Config) (*Node, error) {
 		scheduler: sch, api: apiSrv}, nil
 }
 
-// the start phase. Not needed yet for the version you're about to
-// write. Will kick off goroutines, open listeners, begin Raft
-// participation. Stubs for now, real bodies come later.
+// Start walks subsystems in a specific order calling their Starts;
+// Shutdown walks them in reverse calling their Shutdowns. Both respect the context.
 func (n *Node) Start(ctx context.Context) error {
+	n.stateMachine.Start(ctx)
+	n.callback.Start(ctx)
+	if err := n.api.Start(ctx); err != nil {
+		return fmt.Errorf("api start: %w", err)
+	}
+	if err := n.raftNode.Start(ctx); err != nil {
+		return fmt.Errorf("raftnode start: %w", err)
+	}
+	n.scheduler.Start(ctx)
 	return nil
 }
 
@@ -48,5 +57,15 @@ func (n *Node) Start(ctx context.Context) error {
 //
 // in reverse order, respecting the context deadline.
 func (n *Node) Shutdown(ctx context.Context) error {
-	return nil
+	var errs []error
+	if err := n.scheduler.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("scheduler shutdown: %w", err))
+	}
+	if err := n.api.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("api shutdown: %w", err))
+	}
+	n.raftNode.Shutdown(ctx)
+	n.callback.Shutdown(ctx)
+	n.stateMachine.Shutdown(ctx)
+	return errors.Join(errs...)
 }
