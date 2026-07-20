@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"raft-biling/internal/config"
+	"raft-biling/internal/node"
 )
 
 //All config flags
@@ -50,6 +51,12 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("config: %+v\n", cfg)
+	n, err := node.New(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("node constructed: %+v\n", n)
 	// stMach, err := statemachine.New(cfg*config.Config)(*StateMachine, error)
 	// if err != nil {
 	// 	log.Fatalf("failed to create state machine: %s", err.Error())
