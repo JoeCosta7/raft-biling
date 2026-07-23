@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"raft-biling/internal/model"
@@ -105,6 +107,26 @@ func scheduleKey(tenantID, id string) []byte {
 	return []byte(tenantID + ":" + id)
 }
 
+func executionKey(tenantID, id string) []byte {
+	return []byte(tenantID + ":" + id)
+}
+
+func attemptKey(tenantID, id string) []byte {
+	return []byte(tenantID + ":" + id)
+}
+
+func executionByScheduleKey(tenantID, scheduleID, id string) []byte {
+	return []byte(tenantID + ":" + scheduleID + ":" + id)
+}
+
+func executionByStatusKey(tenantID, status, id string) []byte {
+	return []byte(tenantID + ":" + status + ":" + id)
+}
+
+func attemptsByExecutionKey(tenantID, executionID, id string) []byte {
+	return []byte(tenantID + ":" + executionID + ":" + id)
+}
+
 func (t *boltTx) PutSchedule(s *model.Schedule) error {
 	jsonData, err := json.Marshal(s)
 	if err != nil {
@@ -127,17 +149,37 @@ func (t *boltTx) GetSchedule(tenantID, id string) (*model.Schedule, error) {
 	return &s, nil
 }
 
-func executionKey(tenantID, id string) []byte {
-	return []byte(tenantID + ":" + id)
-}
-
 func (t *boltTx) PutExecution(ex *model.Execution) error {
+	oldRow, err := t.GetExecution(ex.TenantID, ex.ID)
+	if err != nil {
+		return fmt.Errorf("Could not find the execution %w", err)
+	}
+	if oldRow != nil {
+		err := t.tx.Bucket([]byte(bucketExecutionsByStatus)).Delete(executionByStatusKey(oldRow.TenantID, string(oldRow.Status), oldRow.ID))
+		if err != nil {
+			return fmt.Errorf("Delete was not successful %w", err)
+		}
+	}
 	jsonData, err := json.Marshal(ex)
 	if err != nil {
 		return err
 	}
-	key := executionKey(ex.TenantID, ex.ID)
-	return t.tx.Bucket([]byte(bucketExecutions)).Put(key, jsonData)
+	exKey := executionKey(ex.TenantID, ex.ID)
+	exByStatusKey := executionByStatusKey(ex.TenantID, string(ex.Status), ex.ID)
+	exBySchedKey := executionByScheduleKey(ex.TenantID, ex.ScheduleID, ex.ID)
+	err = t.tx.Bucket([]byte(bucketExecutions)).Put(exKey, jsonData)
+	if err != nil {
+		return fmt.Errorf("Put to Executions Bucket was unsuccessful %w", err)
+	}
+	err = t.tx.Bucket([]byte(bucketExecutionsByStatus)).Put(exByStatusKey, nil)
+	if err != nil {
+		return fmt.Errorf("Put to Executions By Status was Bucket was unsuccessful %w", err)
+	}
+	err = t.tx.Bucket([]byte(bucketExecutionsBySchedule)).Put(exBySchedKey, nil)
+	if err != nil {
+		return fmt.Errorf("Put to Executions By Schedule Bucket was unsuccessful %w", err)
+	}
+	return nil
 }
 
 func (t *boltTx) GetExecution(tenantID, id string) (*model.Execution, error) {
@@ -153,18 +195,22 @@ func (t *boltTx) GetExecution(tenantID, id string) (*model.Execution, error) {
 	return &ex, nil
 }
 
-func attemptKey(tenantID, id string) []byte {
-	return []byte(tenantID + ":" + id)
-}
-
 func (t *boltTx) PutAttempt(at *model.Attempt) error {
 	jsonData, err := json.Marshal(at)
 	if err != nil {
 		return err
 	}
 	key := attemptKey(at.TenantID, at.ID)
-	return t.tx.Bucket([]byte(bucketAttempts)).Put(key, jsonData)
-
+	attemptByExecKey := attemptsByExecutionKey(at.TenantID, at.ExecutionID, at.ID)
+	err = t.tx.Bucket([]byte(bucketAttempts)).Put(key, jsonData)
+	if err != nil {
+		return fmt.Errorf("Put to Attempts Bucket was unsuccessful %w", err)
+	}
+	err = t.tx.Bucket([]byte(bucketAttemptsByExecution)).Put(attemptByExecKey, nil)
+	if err != nil {
+		return fmt.Errorf("Put to Attempts By Execution Bucket was unsuccessful %w", err)
+	}
+	return nil
 }
 
 func (t *boltTx) GetAttempt(tenantID, id string) (*model.Attempt, error) {
@@ -181,14 +227,62 @@ func (t *boltTx) GetAttempt(tenantID, id string) (*model.Attempt, error) {
 }
 
 func (t *boltTx) ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*model.Execution) error) error {
-	return nil // TODO: implement in next chunk
+	b := t.tx.Bucket([]byte(bucketExecutionsBySchedule))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + scheduleID + ":")
+	for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		execID := string(bytes.TrimPrefix(k, prefix))
+		exec, err := t.GetExecution(tenantID, execID)
+		if err != nil {
+			return err
+		}
+		if exec == nil {
+			return fmt.Errorf("index entry references missing execution: tenant=%w exec_id=%w", tenantID, execID)
+		}
+		if err := fn(exec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (t *boltTx) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus, fn func(*model.Execution) error) error {
+	b := t.tx.Bucket([]byte(bucketExecutionsByStatus))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + string(status) + ":")
+	for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		execID := string(bytes.TrimPrefix(k, prefix))
+		exec, err := t.GetExecution(tenantID, execID)
+		if err != nil {
+			return err
+		}
+		if exec == nil {
+			return fmt.Errorf("index entry references missing execution: tenant=%w exec_id=%w", tenantID, execID)
+		}
+		if err := fn(exec); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (t *boltTx) ListAttemptsByExecution(tenantID, executionID string, fn func(*model.Attempt) error) error {
+	b := t.tx.Bucket([]byte(bucketAttemptsByExecution))
+	c := b.Cursor()
+	prefix := []byte(tenantID + ":" + executionID + ":")
+	for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		attemptID := string(bytes.TrimPrefix(k, prefix))
+		attempt, err := t.GetAttempt(tenantID, attemptID)
+		if err != nil {
+			return err
+		}
+		if attempt == nil {
+			return fmt.Errorf("index entry references missing attempt: tenant=%w attempt_id=%w", tenantID, attemptID)
+		}
+		if err := fn(attempt); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
