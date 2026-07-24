@@ -2,10 +2,13 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
 type ScheduleType string
+
+var CurrentScheduleSchemaVersion = 1
 
 const (
 	ScheduleTypeOnce      ScheduleType = "once"
@@ -81,5 +84,12 @@ type Schedule struct {
 	ExecutionTimeout time.Duration     `json:"execution_timeout"`
 	CatchUpPolicy    CatchUpPolicy     `json:"catch_up_policy"`
 	Status           ScheduleStatus    `json:"status"`
-	NextRunAt        time.Time         `json:"next_run_at"`
+	NextRunAt        *time.Time        `json:"next_run_at"`
+}
+
+func ComputeNextRun(recurrence *Recurrence, timezone string, from time.Time) (*time.Time, error) {
+	if recurrence == nil {
+		return nil, nil
+	}
+	return nil, errors.New("ComputeNextRun not implemented")
 }
