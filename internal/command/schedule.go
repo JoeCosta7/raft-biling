@@ -25,6 +25,17 @@ type CreateScheduleCommand struct {
 	CatchUpPolicy    model.CatchUpPolicy `json:"catch_up_policy"`
 }
 
+type UpdateScheduleCommand struct {
+	TenantID         string
+	ID               string
+	CallbackURL      *string
+	Headers          *map[string]string
+	Payload          *json.RawMessage
+	RetryBackoff     *model.RetryBackoff
+	MaxAttempts      *int
+	ExecutionTimeout *time.Duration
+}
+
 func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt time.Time) (*model.Schedule, error) {
 	if cmd.TenantID == "" {
 		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
@@ -76,4 +87,47 @@ func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt ti
 		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
 	}
 	return &schedule, nil
+}
+
+func ApplyUpdateSchedule(tx storage.Tx, cmd UpdateScheduleCommand, proposedAt time.Time) (*model.Schedule, error) {
+	if cmd.TenantID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
+	}
+	if cmd.ID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "id", Message: "id is missing"}
+	}
+	existing, err := tx.GetSchedule(cmd.TenantID, cmd.ID)
+	if err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("Getting prexisitng row failed: %v", err)}
+	}
+	if existing == nil {
+		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
+	}
+	if existing.Status == model.ScheduleStatusCanceled {
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot modify a cancelled schedule"}
+	}
+	updated := *existing
+	if cmd.CallbackURL != nil {
+		updated.CallbackURL = *cmd.CallbackURL
+	}
+	if cmd.Headers != nil {
+		updated.Headers = *cmd.Headers
+	}
+	if cmd.Payload != nil {
+		updated.Payload = *cmd.Payload
+	}
+	if cmd.RetryBackoff != nil {
+		updated.RetryBackoff = *cmd.RetryBackoff
+	}
+	if cmd.MaxAttempts != nil {
+		updated.MaxAttempts = *cmd.MaxAttempts
+	}
+	if cmd.ExecutionTimeout != nil {
+		updated.ExecutionTimeout = *cmd.ExecutionTimeout
+	}
+	updated.UpdatedAt = proposedAt
+	if err := tx.PutSchedule(&updated); err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("update failed: %v", err)}
+	}
+	return &updated, nil
 }
