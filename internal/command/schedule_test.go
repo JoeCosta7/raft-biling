@@ -69,6 +69,27 @@ func newTestUpdateScheduleCommand(overrides ...func(*UpdateScheduleCommand)) *Up
 	}
 	return cmd
 }
+func newTestPauseScheduleCommand(overrides ...func(*PauseScheduleCommand)) *PauseScheduleCommand {
+	cmd := &PauseScheduleCommand{
+		TenantID: testTenantID,
+		ID:       testScheduleID,
+	}
+	for _, o := range overrides {
+		o(cmd)
+	}
+	return cmd
+}
+
+func newTestCancelScheduleCommand(overrides ...func(*CancelScheduleCommand)) *CancelScheduleCommand {
+	cmd := &CancelScheduleCommand{
+		TenantID: testTenantID,
+		ID:       testScheduleID,
+	}
+	for _, o := range overrides {
+		o(cmd)
+	}
+	return cmd
+}
 
 func seedSchedule(f *fakeTx, s *model.Schedule) {
 	f.schedules[s.TenantID+":"+s.ID] = s
@@ -377,7 +398,7 @@ func TestApplyUpdateSchedule_NotFound(t *testing.T) {
 	}
 }
 
-func TestApplyUpdateSchedule_CancelledSchedule(t *testing.T) {
+func TestApplyUpdateSchedule_CanceledSchedule(t *testing.T) {
 	tx := newFakeTx()
 	preSeed := newTestSchedule(func(s *model.Schedule) {
 		s.Status = model.ScheduleStatusCanceled
@@ -400,6 +421,189 @@ func TestApplyUpdateSchedule_CancelledSchedule(t *testing.T) {
 	}
 	if cmdErr.Field != "status" {
 		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
+
+}
+
+func TestApplyPauseSchedule_HappyPath(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	cmd := newTestPauseScheduleCommand()
+	proposedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	schedule, err := ApplyPauseSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyPauseSchedule: unexpected error: %v", err)
+	}
+	if schedule == nil {
+		t.Fatal("ApplyPauseSchedule: returned nil schedule with nil error")
+	}
+	if schedule.Status != model.ScheduleStatusPaused {
+		t.Errorf("Schedule did not pause correctly")
+	}
+	if schedule.NextRunAt != nil {
+		t.Error("NextRunAt is not nil")
+	}
+	if !schedule.UpdatedAt.Equal(proposedAt) {
+		t.Error("UpdatedAt did not update")
+	}
+}
+
+func TestApplyPauseSchedule_MissingTenantID(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestPauseScheduleCommand(func(c *PauseScheduleCommand) { c.TenantID = "" })
+	schedule, err := ApplyPauseSchedule(tx, *cmd, time.Time{})
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "tenant_id" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "tenant_id")
+	}
+}
+
+func TestApplyPauseSchedule_NotFound(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestPauseScheduleCommand()
+	schedule, err := ApplyPauseSchedule(tx, *cmd, time.Time{})
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindNotFound {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindNotFound)
+	}
+	if cmdErr.Field != "id" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "id")
+	}
+}
+
+func TestApplyPauseSchedule_CanceledSchedule(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule(func(s *model.Schedule) {
+		s.Status = model.ScheduleStatusCanceled
+	})
+	seedSchedule(tx, preSeed)
+	cmd := newTestPauseScheduleCommand()
+	schedule, err := ApplyPauseSchedule(tx, *cmd, time.Time{})
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "status" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
+
+}
+
+func TestApplyCancelSchedule_HappyPath(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	cmd := newTestCancelScheduleCommand()
+	proposedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	schedule, err := ApplyCancelSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyCancelSchedule: unexpected error: %v", err)
+	}
+	if schedule == nil {
+		t.Fatal("ApplyCancelSchedule: returned nil schedule with nil error")
+	}
+	if schedule.Status != model.ScheduleStatusCanceled {
+		t.Errorf("Schedule did not pause correctly")
+	}
+	if schedule.NextRunAt != nil {
+		t.Error("NextRunAt is not nil")
+	}
+	if !schedule.UpdatedAt.Equal(proposedAt) {
+		t.Errorf("UpdatedAt: got %v, want %v", schedule.UpdatedAt, proposedAt)
+	}
+}
+
+func TestApplyCancelSchedule_MissingTenantID(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCancelScheduleCommand(func(c *CancelScheduleCommand) { c.TenantID = "" })
+	schedule, err := ApplyCancelSchedule(tx, *cmd, time.Time{})
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "tenant_id" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "tenant_id")
+	}
+}
+
+func TestApplyCancelSchedule_NotFound(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCancelScheduleCommand()
+	schedule, err := ApplyCancelSchedule(tx, *cmd, time.Time{})
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindNotFound {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindNotFound)
+	}
+	if cmdErr.Field != "id" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "id")
+	}
+}
+
+func TestApplyCancelSchedule_AlreadyCanceled(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule(func(s *model.Schedule) {
+		s.Status = model.ScheduleStatusCanceled
+	})
+	seedSchedule(tx, preSeed)
+	cmd := newTestCancelScheduleCommand()
+	schedule, err := ApplyCancelSchedule(tx, *cmd, time.Time{})
+	if err != nil {
+		t.Fatalf("expected success on already-canceled, got error: %v", err)
+	}
+	if schedule == nil {
+		t.Fatal("returned nil schedule with nil error")
+	}
+	if schedule.Status != model.ScheduleStatusCanceled {
+		t.Errorf("Status: got %q, want %q", schedule.Status, model.ScheduleStatusCanceled)
 	}
 
 }
