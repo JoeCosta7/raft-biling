@@ -3,6 +3,8 @@ package command
 import (
 	"encoding/json"
 	"time"
+
+	"raft-biling/internal/apperr"
 )
 
 type LogEntry struct {
@@ -11,18 +13,11 @@ type LogEntry struct {
 	Payload    json.RawMessage `json:"payload"`
 }
 
-type CommandError struct {
-	Kind    string
-	Message string
-	Field   string
-	Details map[string]interface{}
-}
-
-func (e *CommandError) Error() string { return e.Message }
+type CommandError = apperr.CommandError
 
 const (
-	KindValidation = "validation"
-	KindConflict   = "conflict"
-	KindNotFound   = "not_found"
-	KindStorage    = "storage"
+	KindValidation = apperr.KindValidation
+	KindConflict   = apperr.KindConflict
+	KindNotFound   = apperr.KindNotFound
+	KindStorage    = apperr.KindStorage
 )

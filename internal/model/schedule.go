@@ -2,7 +2,6 @@ package model
 
 import (
 	"encoding/json"
-	"errors"
 	"time"
 )
 
@@ -18,9 +17,10 @@ const (
 type ScheduleStatus string
 
 const (
-	ScheduleStatusActive   ScheduleStatus = "active"
-	ScheduleStatusPaused   ScheduleStatus = "paused"
-	ScheduleStatusCanceled ScheduleStatus = "canceled"
+	ScheduleStatusActive    ScheduleStatus = "active"
+	ScheduleStatusPaused    ScheduleStatus = "paused"
+	ScheduleStatusCanceled  ScheduleStatus = "canceled"
+	ScheduleStatusCompleted ScheduleStatus = "completed"
 )
 
 type CatchUpPolicy string
@@ -85,11 +85,4 @@ type Schedule struct {
 	CatchUpPolicy    CatchUpPolicy     `json:"catch_up_policy"`
 	Status           ScheduleStatus    `json:"status"`
 	NextRunAt        *time.Time        `json:"next_run_at"`
-}
-
-func ComputeNextRun(recurrence *Recurrence, timezone string, from time.Time) (*time.Time, error) {
-	if recurrence == nil {
-		return nil, nil
-	}
-	return nil, errors.New("ComputeNextRun not implemented")
 }

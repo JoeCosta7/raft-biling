@@ -46,6 +46,11 @@ type CancelScheduleCommand struct {
 	ID       string
 }
 
+type ResumeScheduleCommand struct {
+	TenantID string
+	ID       string
+}
+
 func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt time.Time) (*model.Schedule, error) {
 	if cmd.TenantID == "" {
 		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
@@ -66,7 +71,7 @@ func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt ti
 		nextRun = &cmd.FirstRunAt
 	} else {
 		var nr *time.Time
-		nr, err = model.ComputeNextRun(cmd.Recurrence, cmd.Timezone, cmd.FirstRunAt)
+		nr, err = model.ComputeNextRunOnOrAfter(cmd.Recurrence, cmd.Timezone, cmd.FirstRunAt, cmd.FirstRunAt)
 		if err != nil {
 			return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: err.Error()}
 		}
@@ -114,7 +119,7 @@ func ApplyUpdateSchedule(tx storage.Tx, cmd UpdateScheduleCommand, proposedAt ti
 		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
 	}
 	if existing.Status == model.ScheduleStatusCanceled {
-		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot modify a cancelled schedule"}
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot modify a canceled schedule"}
 	}
 	updated := *existing
 	if cmd.CallbackURL != nil {
@@ -159,6 +164,9 @@ func ApplyPauseSchedule(tx storage.Tx, cmd PauseScheduleCommand, proposedAt time
 	if existing.Status == model.ScheduleStatusCanceled {
 		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot pause a canceled schedule"}
 	}
+	if existing.Status == model.ScheduleStatusCompleted {
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot pause a completed schedule"}
+	}
 	updated := *existing
 	updated.Status = model.ScheduleStatusPaused
 	updated.NextRunAt = nil
@@ -192,4 +200,20 @@ func ApplyCancelSchedule(tx storage.Tx, cmd CancelScheduleCommand, proposedAt ti
 	}
 	return &updated, nil
 
+}
+
+func ApplyResumeSchedule(tx storage.Tx, cmd ResumeScheduleCommand, proposedAt time.Time) (*model.Schedule, error) {
+	if cmd.TenantID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
+	}
+	if cmd.ID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "id", Message: "id is missing"}
+	}
+	existing, err := tx.GetSchedule(cmd.TenantID, cmd.ID)
+	if err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("Getting preexisiting row failed: %v", err)}
+	}
+	if existing == nil {
+		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
+	}
 }
