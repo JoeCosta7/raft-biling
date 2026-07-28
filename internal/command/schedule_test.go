@@ -134,9 +134,69 @@ func TestApplyCreateSchedule_OnceHappyPath(t *testing.T) {
 
 }
 
-func ApplyCreateScheduleHappyPathRecurringPath(t testing.T) {
-	//TODO once recurrence actually works
+func TestApplyCreateSchedule_RecurringHappyPath(t *testing.T) {
+	tx := newFakeTx()
+	seconds := 3600
+	rec := &model.Recurrence{
+		Cadence: model.CadenceInterval,
+		Seconds: &seconds,
+	}
+	proposedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+		c.ScheduleType = model.ScheduleTypeRecurring
+		c.Recurrence = rec
+		c.FirstRunAt = testTime
+		c.Timezone = "UTC"
+	})
+	schedule, err := ApplyCreateSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyCreateSchedule: unexpected error: %v", err)
+	}
+	if schedule == nil {
+		t.Fatal("ApplyCreateSchedule: returned nil schedule with nil error")
+	}
+	if schedule.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", schedule.Status, model.ScheduleStatusActive)
+	}
+	if schedule.NextRunAt == nil {
+		t.Fatalf("NextRunAt is nil")
+	}
+	if !schedule.NextRunAt.Equal(cmd.FirstRunAt) {
+		t.Error("NextRunAt not set correctly")
+	}
+}
 
+func TestApplyCreateSchedule_RecurrenceComputeFails(t *testing.T) {
+	tx := newFakeTx()
+	seconds := 3600
+	rec := &model.Recurrence{
+		Cadence: model.CadenceInterval,
+		Seconds: &seconds,
+	}
+	proposedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) {
+		c.ScheduleType = model.ScheduleTypeRecurring
+		c.Recurrence = rec
+		c.FirstRunAt = testTime
+		c.Timezone = "EST"
+	})
+	schedule, err := ApplyCreateSchedule(tx, *cmd, proposedAt)
+	if schedule != nil {
+		t.Errorf("expected nil schedule on error, got %+v", schedule)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "timezone" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "timezone")
+	}
 }
 
 func TestApplyCreateSchedule_MissingID(t *testing.T) {
@@ -212,21 +272,6 @@ func TestApplyCreateSchedule_MissingTenantID(t *testing.T) {
 	if cmdErr.Field != "tenant_id" {
 		t.Errorf("Field: got %q, want %q", cmdErr.Field, "tenant_id")
 	}
-}
-
-func TestApplyCreateSchedule_RecurrenceComputeFails(t *testing.T) {
-	// TODO: once ComputeNextRun is implemented for real, this test needs
-	// a genuinely-invalid recurrence config to trigger the error path.
-	// For now, the stub errors on any non-nil recurrence, so the default
-	// factory (recurring, non-nil recurrence) triggers the branch.
-	//tx := newFakeTx()
-	//cmd := newTestCreateScheduleCommand() // default is recurring, non-nil recurrence
-
-	//schedule, err := ApplyCreateSchedule(tx, *cmd, time.Time{})
-
-	// same assertion pattern as MissingTenantID:
-	// schedule nil, err non-nil, unwraps to *CommandError,
-	// Kind==KindValidation, Field=="recurrence"
 }
 
 func TestApplyUpdateSchedule_HappyPathOneField(t *testing.T) {

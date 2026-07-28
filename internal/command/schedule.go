@@ -73,7 +73,7 @@ func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt ti
 		var nr *time.Time
 		nr, err = model.ComputeNextRunOnOrAfter(cmd.Recurrence, cmd.Timezone, cmd.FirstRunAt, cmd.FirstRunAt)
 		if err != nil {
-			return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: err.Error()}
+			return nil, err
 		}
 		nextRun = nr
 	}
@@ -216,4 +216,5 @@ func ApplyResumeSchedule(tx storage.Tx, cmd ResumeScheduleCommand, proposedAt ti
 	if existing == nil {
 		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
 	}
+	return nil, nil
 }
