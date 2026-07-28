@@ -142,7 +142,7 @@ func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 			Max:        1 * time.Hour,
 		},
 		ExecutionTimeout: 5 * time.Minute,
-		CatchUpPolicy:    model.CatchUpAll,
+		CatchUpPolicy:    model.CatchUpPolicyAll,
 		Status:           model.ScheduleStatusActive,
 		NextRunAt:        &testTime,
 	}
@@ -150,4 +150,75 @@ func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 		o(sch)
 	}
 	return sch
+}
+
+func newTestPausedSchedule(opts ...func(*model.Schedule)) *model.Schedule {
+	seconds := 3600
+	s := &model.Schedule{
+		SchemaVersion: 1,
+		ID:            testScheduleID,
+		TenantID:      testTenantID,
+		Status:        model.ScheduleStatusPaused,
+		ScheduleType:  model.ScheduleTypeRecurring,
+		CatchUpPolicy: model.CatchUpPolicyAll,
+		Timezone:      "UTC",
+		FirstRunAt:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		Recurrence: &model.Recurrence{
+			Cadence: model.CadenceInterval,
+			Seconds: &seconds,
+		},
+		CreatedAt:   testTime,
+		UpdatedAt:   testTime,
+		MaxAttempts: 5,
+		RetryBackoff: model.RetryBackoff{
+			Initial:    30 * time.Second,
+			Multiplier: 2.0,
+			Max:        1 * time.Hour,
+		},
+		ExecutionTimeout: 5 * time.Minute,
+		NextRunAt:        nil,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+func newTestResumeScheduleCommand(opts ...func(*ResumeScheduleCommand)) *ResumeScheduleCommand {
+	cmd := &ResumeScheduleCommand{
+		TenantID: testTenantID,
+		ID:       testScheduleID,
+	}
+	for _, opt := range opts {
+		opt(cmd)
+	}
+	return cmd
+}
+
+func newTestExecution(opts ...func(*model.Execution)) *model.Execution {
+	ex := &model.Execution{
+		SchemaVersion:  1,
+		ID:             testExecutionID,
+		TenantID:       testTenantID,
+		ScheduleID:     testScheduleID,
+		ScheduledFor:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		IdempotencyKey: testScheduleID + ":" + testExecutionID,
+		Status:         model.ExecutionStatusSucceeded,
+		AttemptCount:   1,
+	}
+	for _, opt := range opts {
+		opt(ex)
+	}
+	return ex
+}
+
+func seedExecution(tx *fakeTx, ex *model.Execution) error {
+	existing, err := tx.GetExecution(ex.TenantID, ex.ID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return nil
+	}
+	return tx.PutExecution(ex)
 }

@@ -237,7 +237,7 @@ func (t *boltTx) ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*
 			return err
 		}
 		if exec == nil {
-			return fmt.Errorf("index entry references missing execution: tenant=%w exec_id=%w", tenantID, execID)
+			return fmt.Errorf("index entry references missing execution: tenant=%s exec_id=%s", tenantID, execID)
 		}
 		if err := fn(exec); err != nil {
 			return err
@@ -257,7 +257,7 @@ func (t *boltTx) ListExecutionsByStatus(tenantID string, status model.ExecutionS
 			return err
 		}
 		if exec == nil {
-			return fmt.Errorf("index entry references missing execution: tenant=%w exec_id=%w", tenantID, execID)
+			return fmt.Errorf("index entry references missing execution: tenant=%s exec_id=%s", tenantID, execID)
 		}
 		if err := fn(exec); err != nil {
 			return err
@@ -277,7 +277,7 @@ func (t *boltTx) ListAttemptsByExecution(tenantID, executionID string, fn func(*
 			return err
 		}
 		if attempt == nil {
-			return fmt.Errorf("index entry references missing attempt: tenant=%w attempt_id=%w", tenantID, attemptID)
+			return fmt.Errorf("index entry references missing attempt: tenant=%s attempt_id=%s", tenantID, attemptID)
 		}
 		if err := fn(attempt); err != nil {
 			return err

@@ -45,7 +45,7 @@ func newTestCreateScheduleCommand(overrides ...func(c *CreateScheduleCommand)) *
 			Max:        1 * time.Hour,
 		},
 		ExecutionTimeout: 5 * time.Minute,
-		CatchUpPolicy:    model.CatchUpAll,
+		CatchUpPolicy:    model.CatchUpPolicyAll,
 	}
 	for _, o := range overrides {
 		o(sch)
@@ -651,4 +651,235 @@ func TestApplyCancelSchedule_AlreadyCanceled(t *testing.T) {
 		t.Errorf("Status: got %q, want %q", schedule.Status, model.ScheduleStatusCanceled)
 	}
 
+}
+
+func TestApplyResumeSchedule_HappyPathFromPaused(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule(func(s *model.Schedule) {
+		s.CatchUpPolicy = model.CatchUpPolicySkipMissed
+	})
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil schedule")
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if got.NextRunAt == nil {
+		t.Fatal("NextRunAt is nil")
+	}
+	expected := time.Date(2026, 7, 21, 13, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(expected) {
+		t.Errorf("NextRunAt: got %v, want %v", *got.NextRunAt, expected)
+	}
+	if !got.UpdatedAt.Equal(proposedAt) {
+		t.Errorf("UpdatedAt: got %v, want %v", got.UpdatedAt, proposedAt)
+	}
+}
+
+func TestApplyResumeSchedule_HappyPathCatchUpAll(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule()
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	ex := newTestExecution()
+	seedExecution(tx, ex)
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil schedule")
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if got.NextRunAt == nil {
+		t.Fatal("NextRunAt is nil")
+	}
+	expected := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(expected) {
+		t.Errorf("NextRunAt: got %v, want %v", *got.NextRunAt, expected)
+	}
+	if !got.UpdatedAt.Equal(proposedAt) {
+		t.Errorf("UpdatedAt: got %v, want %v", got.UpdatedAt, proposedAt)
+	}
+}
+
+func TestApplyResumeSchedule_HappyPathCatchUpLatestOnly(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule(func(s *model.Schedule) {
+		s.CatchUpPolicy = model.CatchUpPolicyLatestOnly
+	})
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil schedule")
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if got.NextRunAt == nil {
+		t.Fatal("NextRunAt is nil")
+	}
+	expected := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(expected) {
+		t.Errorf("NextRunAt: got %v, want %v", *got.NextRunAt, expected)
+	}
+	if !got.UpdatedAt.Equal(proposedAt) {
+		t.Errorf("UpdatedAt: got %v, want %v", got.UpdatedAt, proposedAt)
+	}
+}
+
+func TestApplyResumeSchedule_HappyPathOnceSchedule(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule(func(s *model.Schedule) {
+		s.ScheduleType = model.ScheduleTypeOnce
+	})
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil schedule")
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if got.NextRunAt == nil {
+		t.Fatal("NextRunAt is nil")
+	}
+	expected := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(expected) {
+		t.Errorf("NextRunAt: got %v, want %v", *got.NextRunAt, expected)
+	}
+	if !got.UpdatedAt.Equal(proposedAt) {
+		t.Errorf("UpdatedAt: got %v, want %v", got.UpdatedAt, proposedAt)
+	}
+}
+
+func TestApplyResumeSchedule_HappyPathNoPriorExecutions(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule()
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil schedule")
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if got.NextRunAt == nil {
+		t.Fatal("NextRunAt is nil")
+	}
+	expected := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(expected) {
+		t.Errorf("NextRunAt: got %v, want %v", *got.NextRunAt, expected)
+	}
+	if !got.UpdatedAt.Equal(proposedAt) {
+		t.Errorf("UpdatedAt: got %v, want %v", got.UpdatedAt, proposedAt)
+	}
+}
+
+func TestApplyResumeSchedule_AlreadyActive(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule(func(s *model.Schedule) {
+		s.Status = model.ScheduleStatusActive
+	})
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil schedule")
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if got.Status != model.ScheduleStatusActive {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ScheduleStatusActive)
+	}
+	if !got.UpdatedAt.Equal(schedule.UpdatedAt) {
+		t.Errorf("UpdatedAt was modified: got %v, want %v", got.UpdatedAt, schedule.UpdatedAt)
+	}
+	if got.NextRunAt != schedule.NextRunAt { // both should be nil for the seeded paused/active-override case
+		t.Errorf("NextRunAt was modified: got %v, want %v", got.NextRunAt, schedule.NextRunAt)
+	}
+}
+
+func TestApplyResumeSchedule_CanceledSchedule(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule(func(s *model.Schedule) {
+		s.Status = model.ScheduleStatusCanceled
+	})
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("expected nil schedule on error, got %+v", got)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "status" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
+}
+
+func TestApplyResumeSchedule_CompletedSchedule(t *testing.T) {
+	tx := newFakeTx()
+	proposedAt := testTime
+	schedule := newTestPausedSchedule(func(s *model.Schedule) {
+		s.Status = model.ScheduleStatusCompleted
+	})
+	seedSchedule(tx, schedule)
+	cmd := newTestResumeScheduleCommand()
+	got, err := ApplyResumeSchedule(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("expected nil schedule on error, got %+v", got)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error is not *CommandError: got type %T, value %v", err, err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "status" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
 }

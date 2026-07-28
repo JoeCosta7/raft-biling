@@ -161,6 +161,9 @@ func ApplyPauseSchedule(tx storage.Tx, cmd PauseScheduleCommand, proposedAt time
 	if existing == nil {
 		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
 	}
+	if existing.Status == model.ScheduleStatusPaused {
+		return existing, nil
+	}
 	if existing.Status == model.ScheduleStatusCanceled {
 		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot pause a canceled schedule"}
 	}
@@ -191,6 +194,12 @@ func ApplyCancelSchedule(tx storage.Tx, cmd CancelScheduleCommand, proposedAt ti
 	if existing == nil {
 		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
 	}
+	if existing.Status == model.ScheduleStatusCanceled {
+		return existing, nil
+	}
+	if existing.Status == model.ScheduleStatusCompleted {
+		return existing, nil
+	}
 	updated := *existing
 	updated.Status = model.ScheduleStatusCanceled
 	updated.NextRunAt = nil
@@ -200,6 +209,23 @@ func ApplyCancelSchedule(tx storage.Tx, cmd CancelScheduleCommand, proposedAt ti
 	}
 	return &updated, nil
 
+}
+
+func findMostRecentTerminalExecution(tx storage.Tx, tenantID, scheduleID string) (*model.Execution, error) {
+	var mostRecent *model.Execution
+	err := tx.ListExecutionsBySchedule(tenantID, scheduleID, func(e *model.Execution) error {
+		if !IsTerminal(e.Status) {
+			return nil
+		}
+		if mostRecent == nil || e.ScheduledFor.After(mostRecent.ScheduledFor) {
+			mostRecent = e
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return mostRecent, nil
 }
 
 func ApplyResumeSchedule(tx storage.Tx, cmd ResumeScheduleCommand, proposedAt time.Time) (*model.Schedule, error) {
@@ -216,5 +242,58 @@ func ApplyResumeSchedule(tx storage.Tx, cmd ResumeScheduleCommand, proposedAt ti
 	if existing == nil {
 		return nil, &CommandError{Kind: KindNotFound, Field: "id", Message: "schedule not found"}
 	}
-	return nil, nil
+	if existing.Status == model.ScheduleStatusActive {
+		return existing, nil
+	}
+	if existing.Status == model.ScheduleStatusCanceled {
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot resume a canceled schedule"}
+	}
+	if existing.Status == model.ScheduleStatusCompleted {
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "you cannot resume a completed schedule"}
+	}
+	rec := existing.Recurrence
+	tz := existing.Timezone
+	firstRunAt := existing.FirstRunAt
+	var nextRun *time.Time
+	if existing.ScheduleType == model.ScheduleTypeOnce {
+		nextRun = &firstRunAt
+		//the scheduleType is recurring
+	} else {
+		anchor, err := findMostRecentTerminalExecution(tx, existing.TenantID, existing.ID)
+		if err != nil {
+			return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("Could not find the most recent terminal execution: %v", err)}
+		}
+		switch existing.CatchUpPolicy {
+		case model.CatchUpPolicyAll:
+			if anchor == nil {
+				nextRun, err = model.ComputeNextRunOnOrAfter(rec, tz, firstRunAt, firstRunAt)
+			} else {
+				nextRun, err = model.ComputeNextRunAfter(rec, tz, firstRunAt, anchor.ScheduledFor)
+			}
+			if err != nil {
+				return nil, err
+			}
+		case model.CatchUpPolicyLatestOnly:
+			nextRun, err = model.ComputeLatestRunOnOrBefore(rec, tz, firstRunAt, proposedAt)
+			if err != nil {
+				return nil, err
+			}
+			if nextRun == nil {
+				nextRun = &firstRunAt
+			}
+		case model.CatchUpPolicySkipMissed:
+			nextRun, err = model.ComputeNextRunAfter(rec, tz, firstRunAt, proposedAt)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	updated := *existing
+	updated.NextRunAt = nextRun
+	updated.Status = model.ScheduleStatusActive
+	updated.UpdatedAt = proposedAt
+	if err := tx.PutSchedule(&updated); err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("resume: put schedule failed: %v", err)}
+	}
+	return &updated, nil
 }

@@ -68,9 +68,9 @@ func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 			Max:        1 * time.Hour,
 		},
 		ExecutionTimeout: 5 * time.Minute,
-		CatchUpPolicy:    model.CatchUpAll,
+		CatchUpPolicy:    model.CatchUpPolicyAll,
 		Status:           model.ScheduleStatusActive,
-		NextRunAt:        testTime,
+		NextRunAt:        &testTime,
 	}
 	for _, o := range overrides {
 		o(sch)

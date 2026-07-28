@@ -26,9 +26,9 @@ const (
 type CatchUpPolicy string
 
 const (
-	CatchUpAll        CatchUpPolicy = "catch_up_all"
-	SkipMissed        CatchUpPolicy = "skip_missed"
-	CatchUpLatestOnly CatchUpPolicy = "catch_up_latest_only"
+	CatchUpPolicyAll        CatchUpPolicy = "catch_up_all"
+	CatchUpPolicySkipMissed CatchUpPolicy = "skip_missed"
+	CatchUpPolicyLatestOnly CatchUpPolicy = "catch_up_latest_only"
 )
 
 type Cadence string
