@@ -10,6 +10,8 @@ func DeriveIdempotencyKey(scheduleID string, scheduledFor time.Time) string {
 
 const idempotencyKeyTimeFormat = time.RFC3339Nano
 
+var CurrentExecutionSchemaVersion = 1
+
 type ExecutionStatus string
 
 const (

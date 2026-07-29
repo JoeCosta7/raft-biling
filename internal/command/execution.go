@@ -34,6 +34,22 @@ type TransferExecutionCommand struct {
 	NewOwner     string `json:"new_owner"`
 }
 
+type RecordAttemptCommand struct {
+	TenantID            string               `json:"tenant_id"`
+	ExecutionID         string               `json:"execution_id"`
+	ID                  string               `json:"id"`
+	NodeID              string               `json:"node_id"`
+	StartedAt           *time.Time           `json:"started_at,omitempty"`
+	CompletedAt         *time.Time           `json:"completed_at,omitempty"`
+	Outcome             model.AttemptOutcome `json:"outcome"`
+	RequestURL          string               `json:"request_url"`
+	RequestHeaders      map[string]string    `json:"request_headers,omitempty"`
+	RequestBodyHash     string               `json:"request_body_hash"`
+	ResponseStatus      int                  `json:"response_status"`
+	ResponseBodyExcerpt string               `json:"response_body_excerpt,omitempty"`
+	ResponseHeaders     map[string]string    `json:"response_headers,omitempty"`
+}
+
 // Claim Execution
 // Record Attempt
 func ApplyClaimExecution(tx storage.Tx, cmd ClaimExecutionCommand, proposedAt time.Time) (*model.Execution, error) {
@@ -143,4 +159,81 @@ func ApplyTransferExecution(tx storage.Tx, cmd TransferExecutionCommand, propose
 		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
 	}
 	return &updated, nil
+}
+
+func ApplyRecordAttempt(tx storage.Tx, cmd RecordAttemptCommand, proposedAt time.Time) (*model.Attempt, error) {
+	if cmd.TenantID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
+	}
+	if cmd.ExecutionID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "execution_id", Message: "execution_id is missing"}
+	}
+	if cmd.ID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "id", Message: "id is missing"}
+	}
+	if cmd.NodeID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "node_id", Message: "node_id is missing"}
+	}
+	if cmd.Outcome == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "outcome", Message: "outcome is missing"}
+	}
+	if cmd.StartedAt == nil {
+		return nil, &CommandError{Kind: KindValidation, Field: "started_at", Message: "started_at is missing"}
+	}
+	if cmd.StartedAt.IsZero() {
+		return nil, &CommandError{Kind: KindValidation, Field: "started_at", Message: "started_at is zero"}
+	}
+	if cmd.CompletedAt == nil {
+		return nil, &CommandError{Kind: KindValidation, Field: "completed_at", Message: "completed_at is missing"}
+	}
+	if cmd.CompletedAt.IsZero() {
+		return nil, &CommandError{Kind: KindValidation, Field: "completed_at", Message: "completed_at is zero"}
+	}
+	if cmd.RequestURL == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "request_url", Message: "request_url is missing"}
+	}
+	if cmd.ResponseStatus == 0 {
+		return nil, &CommandError{Kind: KindValidation, Field: "response_status", Message: "response_status is missing"}
+	}
+	exec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("get execution failed: %v", err)}
+	}
+	if exec == nil {
+		return nil, &CommandError{Kind: KindNotFound, Message: "no execution exists"}
+	}
+	if exec.Status != model.ExecutionStatusInFlight {
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "status must be in flight"}
+	}
+	if exec.OwnerNodeID != cmd.NodeID {
+		return nil, &CommandError{Kind: KindConflict, Field: "owner_node_id", Message: "owner node mismatch"}
+	}
+	attempt := model.Attempt{
+		SchemaVersion:       model.CurrentAttemptSchemaVersion,
+		ID:                  cmd.ID,
+		TenantID:            cmd.TenantID,
+		ExecutionID:         cmd.ExecutionID,
+		NodeID:              cmd.NodeID,
+		AttemptNumber:       exec.AttemptCount + 1,
+		StartedAt:           cmd.StartedAt,
+		CompletedAt:         cmd.CompletedAt,
+		RequestURL:          cmd.RequestURL,
+		RequestHeaders:      cmd.RequestHeaders,
+		RequestBodyHash:     cmd.RequestBodyHash,
+		ResponseStatus:      cmd.ResponseStatus,
+		ResponseBodyExcerpt: cmd.ResponseBodyExcerpt,
+		ResponseHeaders:     cmd.ResponseHeaders,
+		Outcome:             cmd.Outcome,
+	}
+	if err := tx.PutAttempt(&attempt); err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
+	}
+	updated := *exec
+	updated.AttemptCount = exec.AttemptCount + 1
+	updated.LastAttemptID = attempt.ID
+	if err := tx.PutExecution(&updated); err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
+	}
+	return &attempt, nil
+
 }

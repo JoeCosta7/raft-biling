@@ -50,6 +50,26 @@ func newTestInFlightExecution(opts ...func(*model.Execution)) *model.Execution {
 	return newTestExecution(append(base, opts...)...)
 }
 
+func newTestRecordAttemptCommand(opts ...func(*RecordAttemptCommand)) *RecordAttemptCommand {
+	startedAt := testTime
+	completedAt := testTime.Add(1 * time.Minute)
+	cmd := &RecordAttemptCommand{
+		TenantID:       testTenantID,
+		ExecutionID:    testExecutionID,
+		ID:             testAttemptID,
+		NodeID:         testCurrentOwner,
+		StartedAt:      &startedAt,
+		CompletedAt:    &completedAt,
+		Outcome:        model.OutcomeSuccess,
+		RequestURL:     "https://example.com/webhook",
+		ResponseStatus: 200,
+	}
+	for _, o := range opts {
+		o(cmd)
+	}
+	return cmd
+}
+
 func TestApplyClaimExecution_HappyPath(t *testing.T) {
 	tx := newFakeTx()
 	seedSchedule(tx, newTestSchedule())
@@ -431,5 +451,215 @@ func TestApplyTransferExecution_CurrentOwnerMismatch(t *testing.T) {
 	}
 	if stored.OwnerNodeID != "node_c" {
 		t.Errorf("stored.OwnerNodeID: got %q, want %q — should not have been clobbered", stored.OwnerNodeID, "node_c")
+	}
+}
+
+func TestApplyRecordAttempt_HappyPath(t *testing.T) {
+	tx := newFakeTx()
+	exec := newTestInFlightExecution()
+	seedExecution(tx, exec)
+	cmd := newTestRecordAttemptCommand()
+	proposedAt := testTime.Add(2 * time.Minute)
+
+	got, err := ApplyRecordAttempt(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyRecordAttempt: unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ApplyRecordAttempt: returned nil attempt with nil error")
+	}
+	if got.ID != cmd.ID {
+		t.Errorf("ID: got %q, want %q", got.ID, cmd.ID)
+	}
+	if got.TenantID != cmd.TenantID {
+		t.Errorf("TenantID: got %q, want %q", got.TenantID, cmd.TenantID)
+	}
+	if got.ExecutionID != cmd.ExecutionID {
+		t.Errorf("ExecutionID: got %q, want %q", got.ExecutionID, cmd.ExecutionID)
+	}
+	if got.NodeID != cmd.NodeID {
+		t.Errorf("NodeID: got %q, want %q", got.NodeID, cmd.NodeID)
+	}
+	if got.AttemptNumber != exec.AttemptCount+1 {
+		t.Errorf("AttemptNumber: got %d, want %d", got.AttemptNumber, exec.AttemptCount+1)
+	}
+	if got.StartedAt == nil || !got.StartedAt.Equal(*cmd.StartedAt) {
+		t.Errorf("StartedAt: got %v, want %v", got.StartedAt, cmd.StartedAt)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(*cmd.CompletedAt) {
+		t.Errorf("CompletedAt: got %v, want %v", got.CompletedAt, cmd.CompletedAt)
+	}
+	if got.RequestURL != cmd.RequestURL {
+		t.Errorf("RequestURL: got %q, want %q", got.RequestURL, cmd.RequestURL)
+	}
+	if got.ResponseStatus != cmd.ResponseStatus {
+		t.Errorf("ResponseStatus: got %d, want %d", got.ResponseStatus, cmd.ResponseStatus)
+	}
+	if got.Outcome != cmd.Outcome {
+		t.Errorf("Outcome: got %q, want %q", got.Outcome, cmd.Outcome)
+	}
+	if got.SchemaVersion != model.CurrentAttemptSchemaVersion {
+		t.Errorf("SchemaVersion: got %d, want %d", got.SchemaVersion, model.CurrentAttemptSchemaVersion)
+	}
+
+	storedAttempt, err := tx.GetAttempt(cmd.TenantID, cmd.ID)
+	if err != nil {
+		t.Fatalf("GetAttempt: unexpected error: %v", err)
+	}
+	if storedAttempt == nil {
+		t.Fatal("GetAttempt: returned nil, expected stored attempt")
+	}
+	if storedAttempt.AttemptNumber != got.AttemptNumber {
+		t.Errorf("storedAttempt.AttemptNumber: got %d, want %d", storedAttempt.AttemptNumber, got.AttemptNumber)
+	}
+
+	storedExec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if storedExec == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if storedExec.AttemptCount != exec.AttemptCount+1 {
+		t.Errorf("storedExec.AttemptCount: got %d, want %d", storedExec.AttemptCount, exec.AttemptCount+1)
+	}
+	if storedExec.LastAttemptID != got.ID {
+		t.Errorf("storedExec.LastAttemptID: got %q, want %q", storedExec.LastAttemptID, got.ID)
+	}
+	if storedExec.Status != model.ExecutionStatusInFlight {
+		t.Errorf("storedExec.Status: got %q, want %q — should not change on recording an attempt", storedExec.Status, model.ExecutionStatusInFlight)
+	}
+	if storedExec.OwnerNodeID != exec.OwnerNodeID {
+		t.Errorf("storedExec.OwnerNodeID: got %q, want %q", storedExec.OwnerNodeID, exec.OwnerNodeID)
+	}
+}
+
+func TestApplyRecordAttempt_NotInFlight(t *testing.T) {
+	tx := newFakeTx()
+	exec := newTestInFlightExecution(func(e *model.Execution) {
+		e.Status = model.ExecutionStatusSucceeded
+	})
+	seedExecution(tx, exec)
+	cmd := newTestRecordAttemptCommand()
+	proposedAt := testTime.Add(2 * time.Minute)
+
+	got, err := ApplyRecordAttempt(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("attempt: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "status" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
+
+	storedAttempt, err := tx.GetAttempt(cmd.TenantID, cmd.ID)
+	if err != nil {
+		t.Fatalf("GetAttempt: unexpected error: %v", err)
+	}
+	if storedAttempt != nil {
+		t.Errorf("GetAttempt: got %v, want nil (write should not have happened)", storedAttempt)
+	}
+
+	storedExec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if storedExec == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if storedExec.AttemptCount != exec.AttemptCount {
+		t.Errorf("storedExec.AttemptCount: got %d, want %d — should not change", storedExec.AttemptCount, exec.AttemptCount)
+	}
+}
+
+func TestApplyRecordAttempt_OwnerMismatch(t *testing.T) {
+	tx := newFakeTx()
+	// exec is owned by node_a; cmd reports the attempt from node_b.
+	exec := newTestInFlightExecution()
+	seedExecution(tx, exec)
+	cmd := newTestRecordAttemptCommand(func(c *RecordAttemptCommand) {
+		c.NodeID = testNewOwner
+	})
+	proposedAt := testTime.Add(2 * time.Minute)
+
+	got, err := ApplyRecordAttempt(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("attempt: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "owner_node_id" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "owner_node_id")
+	}
+
+	storedAttempt, err := tx.GetAttempt(cmd.TenantID, cmd.ID)
+	if err != nil {
+		t.Fatalf("GetAttempt: unexpected error: %v", err)
+	}
+	if storedAttempt != nil {
+		t.Errorf("GetAttempt: got %v, want nil (write should not have happened)", storedAttempt)
+	}
+
+	storedExec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if storedExec == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if storedExec.AttemptCount != exec.AttemptCount {
+		t.Errorf("storedExec.AttemptCount: got %d, want %d — should not change", storedExec.AttemptCount, exec.AttemptCount)
+	}
+}
+
+func TestApplyRecordAttempt_AttemptNumberDerived(t *testing.T) {
+	tx := newFakeTx()
+	exec := newTestInFlightExecution(func(e *model.Execution) {
+		e.AttemptCount = 3
+	})
+	seedExecution(tx, exec)
+	cmd := newTestRecordAttemptCommand()
+	proposedAt := testTime.Add(2 * time.Minute)
+
+	got, err := ApplyRecordAttempt(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyRecordAttempt: unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ApplyRecordAttempt: returned nil attempt with nil error")
+	}
+	if got.AttemptNumber != 4 {
+		t.Errorf("AttemptNumber: got %d, want 4 (derived from exec.AttemptCount=3 + 1)", got.AttemptNumber)
+	}
+
+	storedExec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if storedExec == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if storedExec.AttemptCount != 4 {
+		t.Errorf("storedExec.AttemptCount: got %d, want 4", storedExec.AttemptCount)
+	}
+	if storedExec.LastAttemptID != got.ID {
+		t.Errorf("storedExec.LastAttemptID: got %q, want %q", storedExec.LastAttemptID, got.ID)
 	}
 }

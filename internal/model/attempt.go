@@ -2,6 +2,8 @@ package model
 
 import "time"
 
+var CurrentAttemptSchemaVersion = 1
+
 type AttemptOutcome string
 
 const (
@@ -18,7 +20,7 @@ type Attempt struct {
 	NodeID              string            `json:"node_id"`
 	AttemptNumber       int               `json:"attempt_number"`
 	StartedAt           *time.Time        `json:"started_at,omitempty"`
-	CompletedAt         *time.Time        `json:"completed_at,omitempty"`
+	CompletedAt         *time.Time        `json:"cThompleted_at,omitempty"`
 	RequestURL          string            `json:"request_url"`
 	RequestHeaders      map[string]string `json:"request_headers,omitempty"`
 	RequestBodyHash     string            `json:"request_body_hash"`
