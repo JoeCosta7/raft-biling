@@ -4,6 +4,12 @@ import (
 	"time"
 )
 
+func DeriveIdempotencyKey(scheduleID string, scheduledFor time.Time) string {
+	return scheduleID + ":" + scheduledFor.Format(idempotencyKeyTimeFormat)
+}
+
+const idempotencyKeyTimeFormat = time.RFC3339Nano
+
 type ExecutionStatus string
 
 const (

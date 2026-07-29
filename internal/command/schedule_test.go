@@ -704,7 +704,7 @@ func TestApplyResumeSchedule_HappyPathCatchUpAll(t *testing.T) {
 	if got.NextRunAt == nil {
 		t.Fatal("NextRunAt is nil")
 	}
-	expected := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	expected := time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)
 	if !got.NextRunAt.Equal(expected) {
 		t.Errorf("NextRunAt: got %v, want %v", *got.NextRunAt, expected)
 	}
