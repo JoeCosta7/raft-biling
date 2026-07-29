@@ -21,6 +21,35 @@ func newTestClaimExecutionCommand(opts ...func(*ClaimExecutionCommand)) *ClaimEx
 	return cmd
 }
 
+const (
+	testCurrentOwner = "node_a"
+	testNewOwner     = "node_b"
+)
+
+func newTestTransferExecutionCommand(opts ...func(*TransferExecutionCommand)) *TransferExecutionCommand {
+	cmd := &TransferExecutionCommand{
+		TenantID:     testTenantID,
+		ExecutionID:  testExecutionID,
+		CurrentOwner: testCurrentOwner,
+		NewOwner:     testNewOwner,
+	}
+	for _, o := range opts {
+		o(cmd)
+	}
+	return cmd
+}
+func newTestInFlightExecution(opts ...func(*model.Execution)) *model.Execution {
+	claimedAt := testTime
+	base := []func(*model.Execution){
+		func(e *model.Execution) {
+			e.Status = model.ExecutionStatusInFlight
+			e.OwnerNodeID = testCurrentOwner
+			e.ClaimedAt = &claimedAt
+		},
+	}
+	return newTestExecution(append(base, opts...)...)
+}
+
 func TestApplyClaimExecution_HappyPath(t *testing.T) {
 	tx := newFakeTx()
 	seedSchedule(tx, newTestSchedule())
@@ -228,4 +257,179 @@ func TestApplyClaimExecution_MultipleExistingNoCollision(t *testing.T) {
 		t.Fatal("GetExecution: got nil, want stored execution")
 	}
 
+}
+
+func TestApplyTransferExecution_HappyPath(t *testing.T) {
+	tx := newFakeTx()
+	seedSchedule(tx, newTestSchedule())
+	exec := newTestInFlightExecution()
+	seedExecution(tx, exec)
+	cmd := newTestTransferExecutionCommand()
+	proposedAt := testTime.Add(6 * time.Minute) // past the 5-minute ExecutionTimeout
+
+	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyTransferExecution: unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ApplyTransferExecution: returned nil execution with nil error")
+	}
+	if got.OwnerNodeID != testNewOwner {
+		t.Errorf("OwnerNodeID: got %q, want %q", got.OwnerNodeID, testNewOwner)
+	}
+	if got.ClaimedAt == nil || !got.ClaimedAt.Equal(proposedAt) {
+		t.Errorf("ClaimedAt: got %v, want %v", got.ClaimedAt, proposedAt)
+	}
+	if got.IdempotencyKey != exec.IdempotencyKey {
+		t.Errorf("IdempotencyKey: got %q, want %q (must not change on transfer)", got.IdempotencyKey, exec.IdempotencyKey)
+	}
+
+	stored, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if stored.OwnerNodeID != testNewOwner {
+		t.Errorf("stored.OwnerNodeID: got %q, want %q", stored.OwnerNodeID, testNewOwner)
+	}
+	if stored.IdempotencyKey != exec.IdempotencyKey {
+		t.Errorf("stored.IdempotencyKey: got %q, want %q", stored.IdempotencyKey, exec.IdempotencyKey)
+	}
+}
+
+func TestApplyTransferExecution_SelfTransfer(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestTransferExecutionCommand(func(c *TransferExecutionCommand) {
+		c.NewOwner = c.CurrentOwner
+	})
+	proposedAt := testTime
+
+	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("execution: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindValidation {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindValidation)
+	}
+	if cmdErr.Field != "new_owner" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "new_owner")
+	}
+}
+
+func TestApplyTransferExecution_TimeoutNotElapsed(t *testing.T) {
+	tx := newFakeTx()
+	seedSchedule(tx, newTestSchedule())
+	exec := newTestInFlightExecution()
+	seedExecution(tx, exec)
+	cmd := newTestTransferExecutionCommand()
+	proposedAt := testTime.Add(1 * time.Minute) // well under the 5-minute ExecutionTimeout
+
+	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("execution: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "proposed_at" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "proposed_at")
+	}
+
+	stored, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if stored.OwnerNodeID != testCurrentOwner {
+		t.Errorf("stored.OwnerNodeID: got %q, want %q — should not have transferred", stored.OwnerNodeID, testCurrentOwner)
+	}
+}
+
+func TestApplyTransferExecution_NotInFlight(t *testing.T) {
+	tx := newFakeTx()
+	seedSchedule(tx, newTestSchedule())
+	exec := newTestInFlightExecution(func(e *model.Execution) {
+		e.Status = model.ExecutionStatusSucceeded
+	})
+	seedExecution(tx, exec)
+	cmd := newTestTransferExecutionCommand()
+	proposedAt := testTime.Add(6 * time.Minute)
+
+	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("execution: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "status" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
+}
+
+func TestApplyTransferExecution_CurrentOwnerMismatch(t *testing.T) {
+	tx := newFakeTx()
+	seedSchedule(tx, newTestSchedule())
+	// exec is actually owned by node_c (e.g. C already claimed a fresh transfer);
+	// cmd still carries B's stale belief that node_a is the current owner.
+	exec := newTestInFlightExecution(func(e *model.Execution) {
+		e.OwnerNodeID = "node_c"
+	})
+	seedExecution(tx, exec)
+	cmd := newTestTransferExecutionCommand()
+	proposedAt := testTime.Add(6 * time.Minute)
+
+	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("execution: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "owner_node_id" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "owner_node_id")
+	}
+
+	stored, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if stored.OwnerNodeID != "node_c" {
+		t.Errorf("stored.OwnerNodeID: got %q, want %q — should not have been clobbered", stored.OwnerNodeID, "node_c")
+	}
 }
