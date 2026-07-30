@@ -83,6 +83,18 @@ func newTestCompleteExecutionCommand(opts ...func(*CompleteExecutionCommand)) *C
 	return cmd
 }
 
+func newTestFailExecutionTimeoutCommand(opts ...func(*FailExecutionTimeoutCommand)) *FailExecutionTimeoutCommand {
+	cmd := &FailExecutionTimeoutCommand{
+		TenantID:     testTenantID,
+		ExecutionID:  testExecutionID,
+		FinalOutcome: "timed out",
+	}
+	for _, o := range opts {
+		o(cmd)
+	}
+	return cmd
+}
+
 func TestApplyClaimExecution_HappyPath(t *testing.T) {
 	tx := newFakeTx()
 	seedSchedule(tx, newTestSchedule())
@@ -853,5 +865,139 @@ func TestApplyCompleteExecution_NonTerminalFinalStatus(t *testing.T) {
 	}
 	if stored.CompletedAt != nil {
 		t.Errorf("stored.CompletedAt: got %v, want nil — should not have been set", stored.CompletedAt)
+	}
+}
+
+func TestApplyFailExecutionTimeout_HappyPath_Recurring(t *testing.T) {
+	tx := newFakeTx()
+	schedule := newTestSchedule()
+	seedSchedule(tx, schedule)
+	exec := newTestInFlightExecution()
+	seedExecution(tx, exec)
+	cmd := newTestFailExecutionTimeoutCommand()
+	proposedAt := testTime.Add(10 * time.Minute)
+
+	got, err := ApplyFailExecutionTimeout(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyFailExecutionTimeout: unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ApplyFailExecutionTimeout: returned nil execution with nil error")
+	}
+	if got.Status != model.ExecutionStatusFailedMaxRetries {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ExecutionStatusFailedMaxRetries)
+	}
+	if got.FinalOutcome != cmd.FinalOutcome {
+		t.Errorf("FinalOutcome: got %q, want %q", got.FinalOutcome, cmd.FinalOutcome)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(proposedAt) {
+		t.Errorf("CompletedAt: got %v, want %v", got.CompletedAt, proposedAt)
+	}
+	if got.OwnerNodeID != "" {
+		t.Errorf("OwnerNodeID: got %q, want empty", got.OwnerNodeID)
+	}
+
+	storedExec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if storedExec == nil || storedExec.Status != model.ExecutionStatusFailedMaxRetries {
+		t.Fatalf("storedExec.Status: got %v, want %q", storedExec, model.ExecutionStatusFailedMaxRetries)
+	}
+
+	storedSchedule, err := tx.GetSchedule(cmd.TenantID, exec.ScheduleID)
+	if err != nil {
+		t.Fatalf("GetSchedule: unexpected error: %v", err)
+	}
+	if storedSchedule == nil {
+		t.Fatal("GetSchedule: returned nil, expected stored schedule")
+	}
+	if storedSchedule.Status != model.ScheduleStatusActive {
+		t.Errorf("storedSchedule.Status: got %q, want %q — recurring schedule should stay active", storedSchedule.Status, model.ScheduleStatusActive)
+	}
+	if storedSchedule.NextRunAt == nil {
+		t.Fatal("storedSchedule.NextRunAt: got nil, want advanced past exec.ScheduledFor")
+	}
+	if !storedSchedule.NextRunAt.After(exec.ScheduledFor) {
+		t.Errorf("storedSchedule.NextRunAt: got %v, want after %v", storedSchedule.NextRunAt, exec.ScheduledFor)
+	}
+}
+
+func TestApplyFailExecutionTimeout_HappyPath_Once(t *testing.T) {
+	tx := newFakeTx()
+	schedule := newTestSchedule(func(s *model.Schedule) {
+		s.ScheduleType = model.ScheduleTypeOnce
+	})
+	seedSchedule(tx, schedule)
+	exec := newTestInFlightExecution()
+	seedExecution(tx, exec)
+	cmd := newTestFailExecutionTimeoutCommand()
+	proposedAt := testTime.Add(10 * time.Minute)
+
+	got, err := ApplyFailExecutionTimeout(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyFailExecutionTimeout: unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ApplyFailExecutionTimeout: returned nil execution with nil error")
+	}
+	if got.Status != model.ExecutionStatusFailedMaxRetries {
+		t.Errorf("Status: got %q, want %q", got.Status, model.ExecutionStatusFailedMaxRetries)
+	}
+
+	storedSchedule, err := tx.GetSchedule(cmd.TenantID, exec.ScheduleID)
+	if err != nil {
+		t.Fatalf("GetSchedule: unexpected error: %v", err)
+	}
+	if storedSchedule == nil {
+		t.Fatal("GetSchedule: returned nil, expected stored schedule")
+	}
+	if storedSchedule.Status != model.ScheduleStatusCompleted {
+		t.Errorf("storedSchedule.Status: got %q, want %q", storedSchedule.Status, model.ScheduleStatusCompleted)
+	}
+	if storedSchedule.NextRunAt != nil {
+		t.Errorf("storedSchedule.NextRunAt: got %v, want nil", storedSchedule.NextRunAt)
+	}
+}
+
+func TestApplyFailExecutionTimeout_AlreadyTerminal(t *testing.T) {
+	tx := newFakeTx()
+	exec := newTestInFlightExecution(func(e *model.Execution) {
+		e.Status = model.ExecutionStatusSucceeded
+	})
+	seedExecution(tx, exec)
+	cmd := newTestFailExecutionTimeoutCommand()
+	proposedAt := testTime.Add(10 * time.Minute)
+
+	got, err := ApplyFailExecutionTimeout(tx, *cmd, proposedAt)
+	if got != nil {
+		t.Errorf("execution: got %v, want nil", got)
+	}
+	if err == nil {
+		t.Fatal("error: got nil, want *CommandError")
+	}
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error type: got %T, want *CommandError", err)
+	}
+	if cmdErr.Kind != KindConflict {
+		t.Errorf("Kind: got %q, want %q", cmdErr.Kind, KindConflict)
+	}
+	if cmdErr.Field != "status" {
+		t.Errorf("Field: got %q, want %q", cmdErr.Field, "status")
+	}
+
+	stored, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: unexpected error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("GetExecution: returned nil, expected stored execution")
+	}
+	if stored.Status != model.ExecutionStatusSucceeded {
+		t.Errorf("stored.Status: got %q, want %q — should not have been clobbered", stored.Status, model.ExecutionStatusSucceeded)
+	}
+	if stored.OwnerNodeID != exec.OwnerNodeID {
+		t.Errorf("stored.OwnerNodeID: got %q, want %q — should not have been clobbered", stored.OwnerNodeID, exec.OwnerNodeID)
 	}
 }
