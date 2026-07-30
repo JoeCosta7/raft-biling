@@ -50,6 +50,13 @@ type RecordAttemptCommand struct {
 	ResponseHeaders     map[string]string    `json:"response_headers,omitempty"`
 }
 
+type CompleteExecutionCommand struct {
+	TenantID     string                `json:"tenant_id"`
+	ExecutionID  string                `json:"execution_id"`
+	FinalStatus  model.ExecutionStatus `json:"final_status"`
+	FinalOutcome string                `json:"final_outcome"`
+}
+
 // Claim Execution
 // Record Attempt
 func ApplyClaimExecution(tx storage.Tx, cmd ClaimExecutionCommand, proposedAt time.Time) (*model.Execution, error) {
@@ -236,4 +243,61 @@ func ApplyRecordAttempt(tx storage.Tx, cmd RecordAttemptCommand, proposedAt time
 	}
 	return &attempt, nil
 
+}
+
+func ApplyCompleteExecution(tx storage.Tx, cmd CompleteExecutionCommand, proposedAt time.Time) (*model.Execution, error) {
+	if cmd.TenantID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
+	}
+	if cmd.ExecutionID == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "execution_id", Message: "execution_id is missing"}
+	}
+	if cmd.FinalStatus == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "final_status", Message: "final_status is missing"}
+	}
+	if cmd.FinalOutcome == "" {
+		return nil, &CommandError{Kind: KindValidation, Field: "final_outcome", Message: "final_outcome is missing"}
+	}
+	if !IsTerminal(cmd.FinalStatus) {
+		return nil, &CommandError{Kind: KindValidation, Field: "status", Message: "final_status must be terminal"}
+	}
+	exec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)
+	if err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("get execution failed: %v", err)}
+	}
+	if exec == nil {
+		return nil, &CommandError{Kind: KindNotFound, Message: "no execution exists"}
+	}
+	if IsTerminal(exec.Status) {
+		return nil, &CommandError{Kind: KindConflict, Field: "status", Message: "execution is already terminal"}
+	}
+	updated := *exec
+	updated.Status = cmd.FinalStatus
+	updated.FinalOutcome = cmd.FinalOutcome
+	updated.CompletedAt = &proposedAt
+	updated.OwnerNodeID = ""
+	if err := tx.PutExecution(&updated); err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
+	}
+	schedule, err := tx.GetSchedule(cmd.TenantID, exec.ScheduleID)
+	if err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("get schedule failed: %v", err)}
+	}
+	if schedule == nil {
+		return nil, &CommandError{Kind: KindNotFound, Message: "no schedule exists"}
+	}
+	newSchedule := *schedule
+	if newSchedule.ScheduleType == model.ScheduleTypeRecurring {
+		newSchedule.NextRunAt, err = model.ComputeNextRunAfter(newSchedule.Recurrence, "UTC", newSchedule.FirstRunAt, exec.ScheduledFor)
+		if err != nil {
+			return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: "next run at could now be found"}
+		}
+	} else {
+		newSchedule.Status = model.ScheduleStatusCompleted
+		newSchedule.NextRunAt = nil
+	}
+	if err := tx.PutSchedule(&newSchedule); err != nil {
+		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
+	}
+	return &updated, nil
 }
