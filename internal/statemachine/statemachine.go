@@ -5,18 +5,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"raft-biling/internal/command"
 	"raft-biling/internal/config"
 	"raft-biling/storage"
 
 	"github.com/hashicorp/raft"
+	bolt "go.etcd.io/bbolt"
 )
 
 type StateMachine struct {
 	storage storage.Storage
+	db      *bolt.DB
+	dataDir string
 	//Apply(*Log) interface{} where log entries become state
 	//Snapshot() (FSMSnapshot, error) //log compaction
 	//Restore(io.ReadCloser) error //helps catchup
+}
+
+type FSMSnapshot struct {
+	tx *bolt.Tx
 }
 
 func (sm *StateMachine) Apply(log *raft.Log) any {
@@ -220,12 +230,59 @@ func (sm *StateMachine) Apply(log *raft.Log) any {
 	}
 }
 
+func (sm *StateMachine) Snapshot() (raft.FSMSnapshot, error) {
+	tx, err := sm.db.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	return &FSMSnapshot{tx: tx}, nil
+}
+
+func (sm *StateMachine) Restore(rc io.ReadCloser) error {
+	defer rc.Close()
+	err := sm.db.Close()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(sm.dataDir, "state.db")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(file, rc)
+	if err != nil {
+		return err
+	}
+	file.Close()
+	newDB, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		return err
+	}
+	sm.db = newDB
+
+	return nil
+
+}
+
+func (s *FSMSnapshot) Persist(sink raft.SnapshotSink) error {
+	if _, err := s.tx.WriteTo(sink); err != nil {
+		sink.Cancel()
+		return err
+	}
+	return sink.Close()
+}
+
+func (s *FSMSnapshot) Release() {
+	s.tx.Rollback()
+}
+
 func New(cfg *config.Config) (*StateMachine, error) {
 	store, err := storage.New(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
-	return &StateMachine{storage: store}, nil
+	return &StateMachine{storage: store, db: store.DB(), dataDir: cfg.DataDir}, nil
 }
 
 func (statemachine *StateMachine) Start(ctx context.Context) error    { return nil }

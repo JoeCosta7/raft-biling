@@ -64,6 +64,10 @@ func (s *BoltStorage) Close() error {
 	return s.db.Close()
 }
 
+func (s *BoltStorage) DB() *bolt.DB {
+	return s.db
+}
+
 func New(dataDir string) (*BoltStorage, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, err
