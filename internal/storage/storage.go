@@ -29,6 +29,10 @@ type Tx interface {
 	GetAttempt(tenantID, id string) (*model.Attempt, error)
 	PutAttempt(a *model.Attempt) error
 
+	PutTenant(t *model.Tenant) error
+	GetTenant(id string) (*model.Tenant, error)
+	ListTenants() ([]*model.Tenant, error)
+
 	ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*model.Execution) error) error
 	ListExecutionsByStatus(tenantID string, status model.ExecutionStatus, fn func(*model.Execution) error) error
 	ListAttemptsByExecution(tenantID, executionID string, fn func(*model.Attempt) error) error
@@ -38,6 +42,7 @@ const (
 	bucketSchedules            = "schedules"
 	bucketExecutions           = "executions"
 	bucketAttempts             = "attempts"
+	bucketTenants              = "tenants"
 	bucketExecutionsBySchedule = "executions_by_schedule"
 	bucketExecutionsByStatus   = "executions_by_status"
 	bucketAttemptsByExecution  = "attempts_by_execution"
@@ -83,6 +88,7 @@ func New(dataDir string) (*BoltStorage, error) {
 			[]byte(bucketSchedules),
 			[]byte(bucketExecutions),
 			[]byte(bucketAttempts),
+			[]byte(bucketTenants),
 			[]byte(bucketExecutionsBySchedule),
 			[]byte(bucketExecutionsByStatus),
 			[]byte(bucketAttemptsByExecution),
@@ -228,6 +234,43 @@ func (t *boltTx) GetAttempt(tenantID, id string) (*model.Attempt, error) {
 		return nil, err
 	}
 	return &at, nil
+}
+
+func (t *boltTx) PutTenant(tenant *model.Tenant) error {
+	jsonData, err := json.Marshal(tenant)
+	if err != nil {
+		return err
+	}
+	return t.tx.Bucket([]byte(bucketTenants)).Put([]byte(tenant.ID), jsonData)
+}
+
+func (t *boltTx) GetTenant(id string) (*model.Tenant, error) {
+	raw := t.tx.Bucket([]byte(bucketTenants)).Get([]byte(id))
+	if raw == nil {
+		return nil, nil
+	}
+	var tenant model.Tenant
+	if err := json.Unmarshal(raw, &tenant); err != nil {
+		return nil, err
+	}
+	return &tenant, nil
+}
+
+func (t *boltTx) ListTenants() ([]*model.Tenant, error) {
+	b := t.tx.Bucket([]byte(bucketTenants))
+	var tenants []*model.Tenant
+	err := b.ForEach(func(k, raw []byte) error {
+		var tenant model.Tenant
+		if err := json.Unmarshal(raw, &tenant); err != nil {
+			return err
+		}
+		tenants = append(tenants, &tenant)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tenants, nil
 }
 
 func (t *boltTx) ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*model.Execution) error) error {

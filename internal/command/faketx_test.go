@@ -11,6 +11,7 @@ type fakeTx struct {
 	schedules  map[string]*model.Schedule
 	executions map[string]*model.Execution
 	attempts   map[string]*model.Attempt
+	tenants    map[string]*model.Tenant
 }
 
 func newFakeTx() *fakeTx {
@@ -18,6 +19,7 @@ func newFakeTx() *fakeTx {
 		schedules:  make(map[string]*model.Schedule),
 		executions: make(map[string]*model.Execution),
 		attempts:   make(map[string]*model.Attempt),
+		tenants:    make(map[string]*model.Tenant),
 	}
 }
 
@@ -64,6 +66,28 @@ func (f *fakeTx) PutAttempt(a *model.Attempt) error {
 	key := a.TenantID + ":" + a.ID
 	f.attempts[key] = a
 	return nil
+}
+
+func (f *fakeTx) GetTenant(id string) (*model.Tenant, error) {
+	t, ok := f.tenants[id]
+	if !ok {
+		return nil, nil
+	}
+	return t, nil
+}
+
+func (f *fakeTx) PutTenant(t *model.Tenant) error {
+	f.tenants[t.ID] = t
+	return nil
+}
+
+func (f *fakeTx) ListTenants() ([]*model.Tenant, error) {
+	var tenants []*model.Tenant
+	for _, t := range f.tenants {
+		tenants = append(tenants, t)
+	}
+	sort.Slice(tenants, func(i, j int) bool { return tenants[i].ID < tenants[j].ID })
+	return tenants, nil
 }
 
 func (f *fakeTx) ListExecutionsBySchedule(tenantID, scheduleID string, fn func(*model.Execution) error) error {

@@ -10,7 +10,7 @@ import (
 	"raft-biling/internal/config"
 	"raft-biling/internal/model"
 	"raft-biling/internal/statemachine"
-	"raft-biling/storage"
+	"raft-biling/internal/storage"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -113,6 +113,25 @@ func (rn *RaftNode) GetExecution(tenantID, id string) (*model.Execution, error) 
 		return nil, err
 	}
 	return execution, nil
+}
+
+func (rn *RaftNode) GetAttempt(tenantID, id string) (*model.Attempt, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to GetAttempt on node %v", string(rn.raft.Leader()))
+	}
+	var attempt *model.Attempt
+	err := rn.storage.View(func(tx storage.Tx) error {
+		at, err := tx.GetAttempt(tenantID, id)
+		if err != nil {
+			return err
+		}
+		attempt = at
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return attempt, nil
 }
 
 func (rn *RaftNode) ListExecutionsBySchedule(tenantID, scheduleID string) ([]*model.Execution, error) {

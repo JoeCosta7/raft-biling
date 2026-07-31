@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"raft-biling/internal/command"
 	"raft-biling/internal/config"
-	"raft-biling/storage"
+	"raft-biling/internal/storage"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -32,6 +32,25 @@ func (sm *StateMachine) Apply(log *raft.Log) any {
 		panic(err)
 	}
 	switch envelope.Type {
+	case "create_tenant":
+		var cmd command.CreateTenantCommand
+		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
+			panic(err)
+		}
+		var result any
+		err := sm.storage.Update(func(tx storage.Tx) error {
+			res, herr := command.ApplyCreateTenant(tx, cmd, envelope.ProposedAt)
+			result = res
+			return herr
+		})
+		var cmdErr *command.CommandError
+		if errors.As(err, &cmdErr) {
+			return cmdErr
+		}
+		if err != nil {
+			panic(err)
+		}
+		return result
 	case "create_schedule":
 		var cmd command.CreateScheduleCommand
 		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
