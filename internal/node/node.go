@@ -26,7 +26,7 @@ func New(cfg *config.Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("statemachine: %w", err)
 	}
-	rn, err := raftnode.New(cfg, sm)
+	rn, err := raftnode.New(cfg, sm.Storage())
 	if err != nil {
 		return nil, fmt.Errorf("raftnode: %w", err)
 	}

@@ -20,9 +20,6 @@ type StateMachine struct {
 	storage storage.Storage
 	db      *bolt.DB
 	dataDir string
-	//Apply(*Log) interface{} where log entries become state
-	//Snapshot() (FSMSnapshot, error) //log compaction
-	//Restore(io.ReadCloser) error //helps catchup
 }
 
 type FSMSnapshot struct {
@@ -228,6 +225,10 @@ func (sm *StateMachine) Apply(log *raft.Log) any {
 	default:
 		panic(fmt.Sprintf("unknown log entry type: %q", envelope.Type))
 	}
+}
+
+func (sm *StateMachine) Storage() storage.Storage {
+	return sm.storage
 }
 
 func (sm *StateMachine) Snapshot() (raft.FSMSnapshot, error) {
