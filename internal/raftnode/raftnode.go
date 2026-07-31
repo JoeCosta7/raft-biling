@@ -2,24 +2,79 @@ package raftnode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"raft-biling/internal/command"
 	"raft-biling/internal/config"
 	"raft-biling/internal/model"
+	"raft-biling/internal/statemachine"
 	"raft-biling/storage"
+	"time"
 
 	"github.com/hashicorp/raft"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
 )
 
 type RaftNode struct {
-	raft    *raft.Raft
-	storage storage.Storage
+	raft        *raft.Raft
+	storage     storage.Storage
+	logStore    *raftboltdb.BoltStore
+	stableStore *raftboltdb.BoltStore
+	transport   *raft.NetworkTransport
 }
 
-func New(cfg *config.Config, st storage.Storage) (*RaftNode, error) {
+func New(cfg *config.Config, st storage.Storage, fsm *statemachine.StateMachine) (*RaftNode, error) {
+	config := raft.DefaultConfig()
+	config.LocalID = raft.ServerID(cfg.NodeID)
+	logStore, err := raftboltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-log.db"))
+	if err != nil {
+		return nil, fmt.Errorf("Could not create logStore : %w", err)
+	}
+	stableStore, err := raftboltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-stable.db"))
+	if err != nil {
+		return nil, fmt.Errorf("Could not create stableStore : %w", err)
+	}
+	snapshotStore, err := raft.NewFileSnapshotStore(cfg.DataDir, 3, os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("Could not create snapshotStore : %w", err)
+	}
+	transport, err := raft.NewTCPTransport(cfg.RaftAddr, nil, 3, time.Second, os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("Could not create transport : %w", err)
+	}
+	newRaft, err := raft.NewRaft(config, fsm, logStore, stableStore, snapshotStore, transport)
+	if err != nil {
+		return nil, fmt.Errorf("Could not create raft : %w", err)
+	}
+	var servers []raft.Server
+	for nodeID, addr := range cfg.Peers {
+		server := raft.Server{
+			ID:       raft.ServerID(nodeID),
+			Address:  raft.ServerAddress(addr),
+			Suffrage: raft.Voter,
+		}
+		servers = append(servers, server)
+	}
+	configuration := raft.Configuration{
+		Servers: servers,
+	}
+	var future raft.Future
+	if cfg.Bootstrap {
+		future = newRaft.BootstrapCluster(configuration)
+		if future.Error() != nil {
+			return nil, fmt.Errorf("Could not bootstrap the cluster %w", future.Error())
+		}
+	}
 	return &RaftNode{
-		//raft:raft
-		storage: st,
+		raft:        newRaft,
+		storage:     st,
+		logStore:    logStore,
+		stableStore: stableStore,
+		transport:   transport,
 	}, nil
+
 }
 
 func (rn *RaftNode) GetSchedule(tenantID, id string) (*model.Schedule, error) {
@@ -41,5 +96,132 @@ func (rn *RaftNode) GetSchedule(tenantID, id string) (*model.Schedule, error) {
 	return schedule, nil
 }
 
-func (raftnode *RaftNode) Start(ctx context.Context) error    { return nil }
-func (raftnode *RaftNode) Shutdown(ctx context.Context) error { return nil }
+func (rn *RaftNode) GetExecution(tenantID, id string) (*model.Execution, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to GetExecution on node %v", string(rn.raft.Leader()))
+	}
+	var execution *model.Execution
+	err := rn.storage.View(func(tx storage.Tx) error {
+		ex, err := tx.GetExecution(tenantID, id)
+		if err != nil {
+			return err
+		}
+		execution = ex
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return execution, nil
+}
+
+func (rn *RaftNode) ListExecutionsBySchedule(tenantID, scheduleID string) ([]*model.Execution, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to ListExecutionsBySchedule on node %v", string(rn.raft.Leader()))
+	}
+	var executions []*model.Execution
+	err := rn.storage.View(func(tx storage.Tx) error {
+		err := tx.ListExecutionsBySchedule(tenantID, scheduleID, func(ex *model.Execution) error {
+			executions = append(executions, ex)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return executions, nil
+}
+
+func (rn *RaftNode) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to ListExecutionsByStatus on node %v", string(rn.raft.Leader()))
+	}
+	var executions []*model.Execution
+	err := rn.storage.View(func(tx storage.Tx) error {
+		err := tx.ListExecutionsByStatus(tenantID, status, func(ex *model.Execution) error {
+			executions = append(executions, ex)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return executions, nil
+}
+
+func (rn *RaftNode) ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to ListAttemptsByExecution on node %v", string(rn.raft.Leader()))
+	}
+	var attempts []*model.Attempt
+	err := rn.storage.View(func(tx storage.Tx) error {
+		err := tx.ListAttemptsByExecution(tenantID, executionID, func(at *model.Attempt) error {
+			attempts = append(attempts, at)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return attempts, nil
+}
+
+func (rn *RaftNode) Propose(cmdType string, cmd any, timeout time.Duration) (any, error) {
+	cmdBytes, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("Error while marshalling command to json: %w", err)
+	}
+	logEntry := command.LogEntry{
+		Type:       cmdType,
+		ProposedAt: time.Now(),
+		Payload:    json.RawMessage(cmdBytes),
+	}
+	data, err := json.Marshal(logEntry)
+	if err != nil {
+		return nil, fmt.Errorf("Error while marshalling to json %w", err)
+	}
+	future := rn.raft.Apply(data, timeout)
+	if future.Error() != nil {
+		return nil, fmt.Errorf("Could not apply %w", future.Error())
+	}
+	return future.Response(), nil
+}
+
+func (rn *RaftNode) IsLeader() bool {
+	return rn.raft.State() == raft.Leader
+}
+
+func (rn *RaftNode) LeaderAddr() string {
+	return string(rn.raft.Leader())
+}
+
+func (raftnode *RaftNode) Start(ctx context.Context) error { return nil }
+
+func (rn *RaftNode) Shutdown(ctx context.Context) error {
+	var firstErr error
+	if err := rn.raft.Shutdown().Error(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := rn.logStore.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := rn.stableStore.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := rn.transport.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
