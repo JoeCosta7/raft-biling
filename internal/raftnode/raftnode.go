@@ -96,6 +96,44 @@ func (rn *RaftNode) GetSchedule(tenantID, id string) (*model.Schedule, error) {
 	return schedule, nil
 }
 
+func (rn *RaftNode) GetTenant(tenantID string) (*model.Tenant, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("not leader; current leader is %s", rn.raft.Leader())
+	}
+	var tenant *model.Tenant
+	err := rn.storage.View(func(tx storage.Tx) error {
+		te, err := tx.GetTenant(tenantID)
+		if err != nil {
+			return err
+		}
+		tenant = te
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tenant, nil
+}
+
+func (rn *RaftNode) ListTenants() ([]*model.Tenant, error) {
+	if rn.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("failed to ListTenants on node %v", string(rn.raft.Leader()))
+	}
+	var tenants []*model.Tenant
+	err := rn.storage.View(func(tx storage.Tx) error {
+		ts, err := tx.ListTenants()
+		if err != nil {
+			return err
+		}
+		tenants = ts
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tenants, nil
+}
+
 func (rn *RaftNode) GetExecution(tenantID, id string) (*model.Execution, error) {
 	if rn.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("failed to GetExecution on node %v", string(rn.raft.Leader()))
