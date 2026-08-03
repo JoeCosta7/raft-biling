@@ -165,8 +165,8 @@ func (sm *StateMachine) Apply(log *raft.Log) any {
 			panic(err)
 		}
 		return result
-	case "transfer_execution":
-		var cmd command.TransferExecutionCommand
+	case "adopt_execution":
+		var cmd command.AdoptExecutionCommand
 		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
 			panic(err)
 		}
