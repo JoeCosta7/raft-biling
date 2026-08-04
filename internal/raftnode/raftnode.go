@@ -23,11 +23,13 @@ type RaftNode struct {
 	logStore    *raftboltdb.BoltStore
 	stableStore *raftboltdb.BoltStore
 	transport   *raft.NetworkTransport
+	id          raft.ServerID
 }
 
 func New(cfg *config.Config, st storage.Storage, fsm *statemachine.StateMachine) (*RaftNode, error) {
+	localID := raft.ServerID(cfg.NodeID)
 	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID(cfg.NodeID)
+	config.LocalID = localID
 	logStore, err := raftboltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-log.db"))
 	if err != nil {
 		return nil, fmt.Errorf("Could not create logStore : %w", err)
@@ -73,6 +75,7 @@ func New(cfg *config.Config, st storage.Storage, fsm *statemachine.StateMachine)
 		logStore:    logStore,
 		stableStore: stableStore,
 		transport:   transport,
+		id:          localID,
 	}, nil
 
 }
@@ -258,6 +261,10 @@ func (rn *RaftNode) Propose(cmdType string, cmd any, timeout time.Duration) (any
 
 func (rn *RaftNode) IsLeader() bool {
 	return rn.raft.State() == raft.Leader
+}
+
+func (rn *RaftNode) ID() string {
+	return string(rn.id)
 }
 
 func (rn *RaftNode) LeaderAddr() string {
