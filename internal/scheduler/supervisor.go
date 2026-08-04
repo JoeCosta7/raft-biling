@@ -44,7 +44,7 @@ func (sv *Supervisor) Run(ctx context.Context) error {
 	}
 	stopWorker := func() {
 		if sv.cancel == nil {
-			sv.logger.Error("attempted to stop the leader loop while leader loop is not running")
+			sv.logger.Warn("attempted to stop the leader loop while leader loop is not running")
 			return
 		}
 		sv.cancel()
