@@ -26,6 +26,10 @@ type RaftNode struct {
 	id          raft.ServerID
 }
 
+func (rn *RaftNode) TransferLeadership() error {
+	return rn.raft.LeadershipTransfer().Error()
+}
+
 func New(cfg *config.Config, st storage.Storage, fsm *statemachine.StateMachine) (*RaftNode, error) {
 	localID := raft.ServerID(cfg.NodeID)
 	config := raft.DefaultConfig()

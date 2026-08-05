@@ -12,6 +12,7 @@ type Reader interface {
 type Proposer interface {
 	Propose(cmdType string, cmd any, timeout time.Duration) (any, error)
 	ID() string
+	TransferLeadership() error
 }
 
 type Runner interface {
