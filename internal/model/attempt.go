@@ -28,4 +28,5 @@ type Attempt struct {
 	ResponseBodyExcerpt string            `json:"response_body_excerpt,omitempty"`
 	ResponseHeaders     map[string]string `json:"response_headers,omitempty"`
 	Outcome             AttemptOutcome    `json:"outcome"`
+	RetryAt             time.Time         `json:"retry_at"`
 }

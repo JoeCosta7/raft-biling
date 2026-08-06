@@ -223,6 +223,16 @@ func ApplyRecordAttempt(tx storage.Tx, cmd RecordAttemptCommand, proposedAt time
 		ResponseHeaders:     cmd.ResponseHeaders,
 		Outcome:             cmd.Outcome,
 	}
+	if cmd.Outcome == model.OutcomeRetry {
+		schedule, err := tx.GetSchedule(cmd.TenantID, exec.ScheduleID)
+		if err != nil {
+			return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("get schedule failed: %v", err)}
+		}
+		if schedule == nil {
+			return nil, &CommandError{Kind: KindNotFound, Message: "no schedule exists"}
+		}
+		attempt.RetryAt = proposedAt.Add(schedule.RetryBackoff.DelayForAttempt(attempt.AttemptNumber))
+	}
 	if err := tx.PutAttempt(&attempt); err != nil {
 		return nil, &CommandError{Kind: KindStorage, Message: fmt.Sprintf("write failed: %v", err)}
 	}

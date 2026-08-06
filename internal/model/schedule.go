@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 )
 
@@ -63,6 +64,18 @@ type RetryBackoff struct {
 	Initial    time.Duration `json:"initial"`
 	Multiplier float64       `json:"multiplier"`
 	Max        time.Duration `json:"max"`
+}
+
+// delay for attempt
+func (rb RetryBackoff) DelayForAttempt(attemptNumber int) time.Duration {
+	if attemptNumber < 1 {
+		attemptNumber = 1
+	}
+	delay := time.Duration(float64(rb.Initial) * math.Pow(rb.Multiplier, float64(attemptNumber-1)))
+	if rb.Max > 0 && delay > rb.Max {
+		return rb.Max
+	}
+	return delay
 }
 
 type Schedule struct {

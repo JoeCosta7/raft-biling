@@ -2,9 +2,40 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"raft-biling/internal/model"
 	"time"
 )
+
+type Bucket string
+
+const (
+	BucketNoAttempts      Bucket = "no_attempts"
+	BucketSuccess         Bucket = "success"
+	BucketTerminalFailure Bucket = "terminal_failure"
+	BucketRetryElapsed    Bucket = "retry_elapsed"
+	BucketRetryPending    Bucket = "retry_pending"
+)
+
+func classifyOne(exec model.Execution, attempts []model.Attempt, now time.Time) (Bucket, error) {
+	if len(attempts) == 0 {
+		return BucketNoAttempts, nil
+	}
+	switch attempts[len(attempts)-1].Outcome {
+	case model.OutcomeSuccess:
+		return BucketSuccess, nil
+	case model.OutcomeTerminalFailure:
+		return BucketTerminalFailure, nil
+	case model.OutcomeRetry:
+		if !now.Before(attempts[len(attempts)-1].RetryAt) {
+			return BucketRetryElapsed, nil
+		}
+		return BucketRetryPending, nil
+	default:
+		return "", fmt.Errorf("unknown outcome value: %v", attempts[len(attempts)-1].Outcome)
+	}
+}
 
 type Worker struct {
 	reader   Reader
