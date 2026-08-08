@@ -2,11 +2,14 @@ package scheduler
 
 import (
 	"context"
+	"raft-biling/internal/model"
 	"time"
 )
 
 type Reader interface {
-	//will populate later
+	ListTenants() ([]*model.Tenant, error)
+	ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error)
+	ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error)
 }
 
 type Proposer interface {
