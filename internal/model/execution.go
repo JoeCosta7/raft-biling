@@ -36,5 +36,6 @@ type Execution struct {
 	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
 	AttemptCount   int             `json:"attempt_count"`
 	LastAttemptID  string          `json:"last_attempt_id"`
+	LastRetryAt    *time.Time      `json:"last_retry_at,omitempty"`
 	FinalOutcome   string          `json:"final_outcome,omitempty"`
 }
