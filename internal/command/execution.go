@@ -42,6 +42,7 @@ type RecordAttemptCommand struct {
 	StartedAt           *time.Time           `json:"started_at,omitempty"`
 	CompletedAt         *time.Time           `json:"completed_at,omitempty"`
 	Outcome             model.AttemptOutcome `json:"outcome"`
+	RetryAt             *time.Time           `json:"retry_at,omitempty"`
 	RequestURL          string               `json:"request_url"`
 	RequestHeaders      map[string]string    `json:"request_headers,omitempty"`
 	RequestBodyHash     string               `json:"request_body_hash"`
@@ -55,6 +56,7 @@ type CompleteExecutionCommand struct {
 	ExecutionID  string                `json:"execution_id"`
 	FinalStatus  model.ExecutionStatus `json:"final_status"`
 	FinalOutcome string                `json:"final_outcome"`
+	NextRunAt    *time.Time            `json:"next_run_at,omitempty"`
 }
 
 type FailExecutionTimeoutCommand struct {

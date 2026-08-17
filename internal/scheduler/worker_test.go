@@ -30,9 +30,6 @@ func (f *fakeReader) ListTenants() ([]*model.Tenant, error) {
 	return f.tenants, nil
 }
 
-// ListExecutionsByStatus ignores status: runRecover only ever asks for
-// ExecutionStatusInFlight, so the fixture data per tenant already represents
-// exactly that set.
 func (f *fakeReader) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error) {
 	if err := f.listExecutionsErr[tenantID]; err != nil {
 		return nil, err
@@ -45,6 +42,14 @@ func (f *fakeReader) ListAttemptsByExecution(tenantID, executionID string) ([]*m
 		return nil, err
 	}
 	return f.attemptsByExec[executionID], nil
+}
+
+func (f *fakeReader) ListSchedulesDue(tenantID string) ([]*model.Schedule, error) {
+	return nil, nil
+}
+
+func (f *fakeReader) GetSchedule(tenantID, id string) (*model.Schedule, error) {
+	return nil, nil
 }
 
 type proposal struct {

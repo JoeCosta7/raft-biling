@@ -1,14 +1,21 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"raft-biling/internal/command"
 	"raft-biling/internal/model"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 )
 
 type Bucket string
@@ -23,6 +30,15 @@ const (
 
 // proposeTimeout bounds how long a single recovery-driven Propose call waits.
 const proposeTimeout = 5 * time.Second
+
+// TODO timeoutThreshold value needs to be figured out
+const timeoutThreshold = 5 * time.Minute
+
+// TODO httpClientTimeout value needs to be figured out
+const httpClientTimeout = 30 * time.Second
+
+// responseExcerptLimit bounds how much of a callback response body is retained on an Attempt.
+const responseExcerptLimit = 4096
 
 type inFlightTaskKind string
 
@@ -41,12 +57,47 @@ type inFlightTask struct {
 }
 
 type freshFireTask struct {
-	schedule     *model.Schedule
-	scheduledFor time.Time
-	nodeID       string
-	wg           *sync.WaitGroup
-	ctx          context.Context
-	proposer     Proposer
+	schedule   *model.Schedule
+	exec       model.Execution
+	nodeID     string
+	wg         *sync.WaitGroup
+	ctx        context.Context
+	proposer   Proposer
+	httpClient *http.Client
+	logger     *slog.Logger
+}
+
+// asCommandError extracts a *command.CommandError from a Propose result. A Propose call
+// can return (result, nil) even when the command was rejected: business-rule failures come
+// back as the FSM's response value, not as the raft-level error — only replication failures
+// (leadership loss, timeout) surface through the returned error.
+func asCommandError(result any) *command.CommandError {
+	cmdErr, _ := result.(*command.CommandError)
+	return cmdErr
+}
+
+// 2XX = success
+func classifyAttemptOutcome(status int, doErr error, attemptNumber, maxAttempts int) model.AttemptOutcome {
+	if doErr == nil && status >= 200 && status < 300 {
+		return model.OutcomeSuccess
+	}
+	if maxAttempts > 0 && attemptNumber >= maxAttempts {
+		return model.OutcomeTerminalFailure
+	}
+	return model.OutcomeRetry
+}
+
+func flattenHeaders(h http.Header) map[string]string {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		if len(v) > 0 {
+			out[k] = v[0]
+		}
+	}
+	return out
 }
 
 func classifyOne(exec model.Execution, attempts []*model.Attempt, now time.Time) (Bucket, error) {
@@ -69,20 +120,22 @@ func classifyOne(exec model.Execution, attempts []*model.Attempt, now time.Time)
 }
 
 type Worker struct {
-	reader   Reader
-	proposer Proposer
-	nodeID   string
-	logger   *slog.Logger
-	taskCh   chan any
+	reader     Reader
+	proposer   Proposer
+	nodeID     string
+	logger     *slog.Logger
+	taskCh     chan any
+	httpClient *http.Client
 }
 
 func NewWorker(reader Reader, proposer Proposer, logger *slog.Logger) *Worker {
 	return &Worker{
-		reader:   reader,
-		proposer: proposer,
-		nodeID:   proposer.ID(),
-		logger:   logger,
-		taskCh:   make(chan any, 256),
+		reader:     reader,
+		proposer:   proposer,
+		nodeID:     proposer.ID(),
+		logger:     logger,
+		taskCh:     make(chan any, 256),
+		httpClient: &http.Client{Timeout: httpClientTimeout},
 	}
 }
 
@@ -93,6 +146,89 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err := w.steadyState(ctx); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (t *freshFireTask) run(ctx context.Context) error {
+	execID := t.exec.ID
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	attemptID := ulid.Make().String()
+	startedAt := time.Now()
+	body := t.schedule.Payload
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.schedule.CallbackURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request for execution %s: %w", execID, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range t.schedule.Headers {
+		req.Header.Set(k, v)
+	}
+	bodyHash := sha256.Sum256(body)
+	resp, doErr := t.httpClient.Do(req)
+	completedAt := time.Now()
+	var respStatus int
+	var respHeaders map[string]string
+	var respExcerpt string
+	if resp != nil {
+		defer resp.Body.Close()
+		respStatus = resp.StatusCode
+		respHeaders = flattenHeaders(resp.Header)
+
+		excerpt, readErr := io.ReadAll(io.LimitReader(resp.Body, responseExcerptLimit))
+		respExcerpt = string(excerpt)
+		if readErr != nil {
+			t.logger.Warn("failed to fully read callback response body",
+				"execution", execID, "err", readErr)
+		}
+	}
+	const attemptNumber = 1
+	outcome := classifyAttemptOutcome(respStatus, doErr, attemptNumber, t.schedule.MaxAttempts)
+
+	recordCmd := command.RecordAttemptCommand{
+		TenantID:            t.schedule.TenantID,
+		ExecutionID:         execID,
+		ID:                  attemptID,
+		NodeID:              t.nodeID,
+		StartedAt:           &startedAt,
+		CompletedAt:         &completedAt,
+		Outcome:             outcome,
+		RequestURL:          t.schedule.CallbackURL,
+		RequestHeaders:      t.schedule.Headers,
+		RequestBodyHash:     hex.EncodeToString(bodyHash[:]),
+		ResponseStatus:      respStatus,
+		ResponseBodyExcerpt: respExcerpt,
+		ResponseHeaders:     respHeaders,
+	}
+	result, err := t.proposer.Propose("record_attempt", recordCmd, proposeTimeout)
+	if err != nil {
+		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
+	}
+	if cmdErr := asCommandError(result); cmdErr != nil {
+		return fmt.Errorf("record attempt rejected for execution %s: %w", execID, cmdErr)
+	}
+
+	if outcome != model.OutcomeRetry {
+		finalStatus := model.ExecutionStatusSucceeded
+		if outcome == model.OutcomeTerminalFailure {
+			finalStatus = model.ExecutionStatusFailedTerminal
+		}
+		completeCmd := command.CompleteExecutionCommand{
+			TenantID:     t.schedule.TenantID,
+			ExecutionID:  execID,
+			FinalStatus:  finalStatus,
+			FinalOutcome: string(outcome),
+		}
+		result, err := t.proposer.Propose("complete_execution", completeCmd, proposeTimeout)
+		if err != nil {
+			return fmt.Errorf("propose complete for execution %s: %w", execID, err)
+		}
+		if cmdErr := asCommandError(result); cmdErr != nil {
+			return fmt.Errorf("complete execution rejected for execution %s: %w", execID, cmdErr)
+		}
+	}
+
 	return nil
 }
 
@@ -225,13 +361,50 @@ func (w *Worker) runTick(ctx context.Context) error {
 				continue
 			}
 			scheduledFor := *schedule.NextRunAt
+			// Claim here, before the task is constructed, so the (possibly slow) HTTP
+			// dispatch in freshFireTask.run never holds up a Raft round-trip, and a
+			// losing race against another node's scan is resolved cheaply — as a
+			// rejected claim — rather than after paying for an HTTP call.
+			claimCmd := command.ClaimExecutionCommand{
+				ID:           ulid.Make().String(),
+				TenantID:     tenant.ID,
+				ScheduleID:   schedule.ID,
+				ScheduledFor: scheduledFor,
+				OwnerNodeID:  w.nodeID,
+			}
+			result, err := w.proposer.Propose("claim_execution", claimCmd, proposeTimeout)
+			if err != nil {
+				w.logger.Warn("propose claim execution failed",
+					"tenant", tenant.ID, "schedule", schedule.ID, "err", err)
+				continue
+			}
+			if cmdErr := asCommandError(result); cmdErr != nil {
+				if cmdErr.Kind == command.KindConflict {
+					// Another node's scan already claimed this occurrence — expected
+					// under concurrent scanning, not a failure.
+					w.logger.Info("execution already claimed for schedule occurrence",
+						"tenant", tenant.ID, "schedule", schedule.ID, "scheduled_for", scheduledFor)
+				} else {
+					w.logger.Warn("claim execution rejected",
+						"tenant", tenant.ID, "schedule", schedule.ID, "err", cmdErr)
+				}
+				continue
+			}
+			claimedExec, ok := result.(*model.Execution)
+			if !ok || claimedExec == nil {
+				w.logger.Error("claim execution returned unexpected result",
+					"tenant", tenant.ID, "schedule", schedule.ID)
+				continue
+			}
 			dispatch := freshFireTask{
-				schedule:     &schedule,
-				scheduledFor: scheduledFor,
-				nodeID:       w.nodeID,
-				wg:           &wg,
-				ctx:          ctx,
-				proposer:     w.proposer,
+				schedule:   schedule,
+				exec:       *claimedExec,
+				nodeID:     w.nodeID,
+				wg:         &wg,
+				ctx:        ctx,
+				proposer:   w.proposer,
+				httpClient: w.httpClient,
+				logger:     w.logger,
 			}
 			wg.Add(1)
 			w.taskCh <- dispatch
@@ -255,7 +428,7 @@ func (w *Worker) runTick(ctx context.Context) error {
 				}
 				executeRetry := inFlightTask{
 					exec:     *exec,
-					schedule: &schedule,
+					schedule: schedule,
 					wg:       &wg,
 					kind:     KindRetry,
 					ctx:      ctx,
@@ -280,19 +453,3 @@ func (w *Worker) runTick(ctx context.Context) error {
 	wg.Wait()
 	return nil
 }
-
-// 1. Create WaitGroup for this tick
-// 2. List tenants
-// 3. For each tenant:
-//    a. Schedule-scan
-//       - for each due Schedule:
-//         - construct dispatchTask (isRetry=false)
-//         - wg.Add(1)
-//         - send task to w.taskCh
-//    b. In-flight scan (merged retry + timeout)
-//       - for each in-flight Execution:
-//         - check last_retry_at <= now → retry task
-//         - check now - claimed_at > threshold → timeout task
-//         - construct dispatchTask, wg.Add(1), send to w.taskCh
-// 4. Wait on WaitGroup
-// 5. Return
