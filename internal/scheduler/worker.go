@@ -48,12 +48,14 @@ const (
 )
 
 type inFlightTask struct {
-	exec     model.Execution
-	schedule *model.Schedule
-	wg       *sync.WaitGroup
-	kind     inFlightTaskKind
-	ctx      context.Context
-	proposer Proposer
+	exec       model.Execution
+	schedule   *model.Schedule
+	wg         *sync.WaitGroup
+	kind       inFlightTaskKind
+	ctx        context.Context
+	proposer   Proposer
+	httpClient *http.Client
+	logger     *slog.Logger
 }
 
 type freshFireTask struct {
@@ -67,10 +69,6 @@ type freshFireTask struct {
 	logger     *slog.Logger
 }
 
-// asCommandError extracts a *command.CommandError from a Propose result. A Propose call
-// can return (result, nil) even when the command was rejected: business-rule failures come
-// back as the FSM's response value, not as the raft-level error — only replication failures
-// (leadership loss, timeout) surface through the returned error.
 func asCommandError(result any) *command.CommandError {
 	cmdErr, _ := result.(*command.CommandError)
 	return cmdErr
@@ -185,7 +183,11 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	}
 	const attemptNumber = 1
 	outcome := classifyAttemptOutcome(respStatus, doErr, attemptNumber, t.schedule.MaxAttempts)
-
+	var retryAt *time.Time
+	if outcome == model.OutcomeRetry {
+		at := completedAt.Add(t.schedule.RetryBackoff.DelayForAttempt(attemptNumber))
+		retryAt = &at
+	}
 	recordCmd := command.RecordAttemptCommand{
 		TenantID:            t.schedule.TenantID,
 		ExecutionID:         execID,
@@ -200,13 +202,154 @@ func (t *freshFireTask) run(ctx context.Context) error {
 		ResponseStatus:      respStatus,
 		ResponseBodyExcerpt: respExcerpt,
 		ResponseHeaders:     respHeaders,
+		RetryAt:             retryAt,
 	}
+
 	result, err := t.proposer.Propose("record_attempt", recordCmd, proposeTimeout)
 	if err != nil {
 		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
 	}
 	if cmdErr := asCommandError(result); cmdErr != nil {
 		return fmt.Errorf("record attempt rejected for execution %s: %w", execID, cmdErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if outcome != model.OutcomeRetry {
+		finalStatus := model.ExecutionStatusSucceeded
+		if outcome == model.OutcomeTerminalFailure {
+			finalStatus = model.ExecutionStatusFailedTerminal
+		}
+		completeCmd := command.CompleteExecutionCommand{
+			TenantID:     t.schedule.TenantID,
+			ExecutionID:  execID,
+			FinalStatus:  finalStatus,
+			FinalOutcome: string(outcome),
+		}
+		result, err := t.proposer.Propose("complete_execution", completeCmd, proposeTimeout)
+		if err != nil {
+			return fmt.Errorf("propose complete for execution %s: %w", execID, err)
+		}
+		if cmdErr := asCommandError(result); cmdErr != nil {
+			return fmt.Errorf("complete execution rejected for execution %s: %w", execID, cmdErr)
+		}
+	}
+
+	return nil
+}
+
+func (t *inFlightTask) run(ctx context.Context) {
+	defer t.wg.Done()
+
+	execID := t.exec.ID
+
+	if err := ctx.Err(); err != nil {
+		t.logger.Warn("in-flight task not started: context already cancelled",
+			"kind", t.kind, "execution", execID, "err", err)
+		return
+	}
+
+	var err error
+	switch t.kind {
+	case KindRetry:
+		err = t.runRetry(ctx, execID)
+	case KindTimeout:
+		err = t.runTimeout(execID)
+	default:
+		t.logger.Error("inFlightTask: unhandled kind", "kind", t.kind, "execution", execID)
+		return
+	}
+	if err != nil {
+		t.logger.Error("in-flight task failed", "kind", t.kind, "execution", execID, "err", err)
+	}
+}
+
+func (t *inFlightTask) runTimeout(execID string) error {
+	cmd := command.FailExecutionTimeoutCommand{
+		TenantID:     t.exec.TenantID,
+		ExecutionID:  execID,
+		FinalOutcome: model.FinalOutcomeTimedOut,
+	}
+	result, err := t.proposer.Propose("fail_execution_timeout", cmd, proposeTimeout)
+	if err != nil {
+		return fmt.Errorf("propose fail execution timeout for execution %s: %w", execID, err)
+	}
+	if cmdErr := asCommandError(result); cmdErr != nil {
+		if cmdErr.Kind == command.KindConflict {
+			t.logger.Info("execution already terminal, timeout not applied",
+				"execution", execID, "err", cmdErr)
+			return nil
+		}
+		return fmt.Errorf("fail execution timeout rejected for execution %s: %w", execID, cmdErr)
+	}
+	return nil
+}
+
+func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
+	attemptID := ulid.Make().String()
+	startedAt := time.Now()
+	body := t.schedule.Payload
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.schedule.CallbackURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request for execution %s: %w", execID, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range t.schedule.Headers {
+		req.Header.Set(k, v)
+	}
+	bodyHash := sha256.Sum256(body)
+	resp, doErr := t.httpClient.Do(req)
+	completedAt := time.Now()
+	var respStatus int
+	var respHeaders map[string]string
+	var respExcerpt string
+	if resp != nil {
+		defer resp.Body.Close()
+		respStatus = resp.StatusCode
+		respHeaders = flattenHeaders(resp.Header)
+
+		excerpt, readErr := io.ReadAll(io.LimitReader(resp.Body, responseExcerptLimit))
+		respExcerpt = string(excerpt)
+		if readErr != nil {
+			t.logger.Warn("failed to fully read callback response body",
+				"execution", execID, "err", readErr)
+		}
+	}
+
+	attemptNumber := t.exec.AttemptCount + 1
+	outcome := classifyAttemptOutcome(respStatus, doErr, attemptNumber, t.schedule.MaxAttempts)
+	var retryAt *time.Time
+	if outcome == model.OutcomeRetry {
+		at := completedAt.Add(t.schedule.RetryBackoff.DelayForAttempt(attemptNumber))
+		retryAt = &at
+	}
+	recordCmd := command.RecordAttemptCommand{
+		TenantID:            t.schedule.TenantID,
+		ExecutionID:         execID,
+		ID:                  attemptID,
+		NodeID:              t.proposer.ID(),
+		StartedAt:           &startedAt,
+		CompletedAt:         &completedAt,
+		Outcome:             outcome,
+		RequestURL:          t.schedule.CallbackURL,
+		RequestHeaders:      t.schedule.Headers,
+		RequestBodyHash:     hex.EncodeToString(bodyHash[:]),
+		ResponseStatus:      respStatus,
+		ResponseBodyExcerpt: respExcerpt,
+		ResponseHeaders:     respHeaders,
+		RetryAt:             retryAt,
+	}
+
+	result, err := t.proposer.Propose("record_attempt", recordCmd, proposeTimeout)
+	if err != nil {
+		return fmt.Errorf("propose record attempt for execution %s: %w", execID, err)
+	}
+	if cmdErr := asCommandError(result); cmdErr != nil {
+		return fmt.Errorf("record attempt rejected for execution %s: %w", execID, cmdErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if outcome != model.OutcomeRetry {
@@ -375,7 +518,7 @@ func (w *Worker) runTick(ctx context.Context) error {
 			result, err := w.proposer.Propose("claim_execution", claimCmd, proposeTimeout)
 			if err != nil {
 				w.logger.Warn("propose claim execution failed",
-					"tenant", tenant.ID, "schedule", schedule.ID, "err", err)
+					"tenant", tenant.ID, "schedule", schedule.ID, "execution", claimCmd.ID, "err", err)
 				continue
 			}
 			if cmdErr := asCommandError(result); cmdErr != nil {
@@ -386,7 +529,7 @@ func (w *Worker) runTick(ctx context.Context) error {
 						"tenant", tenant.ID, "schedule", schedule.ID, "scheduled_for", scheduledFor)
 				} else {
 					w.logger.Warn("claim execution rejected",
-						"tenant", tenant.ID, "schedule", schedule.ID, "err", cmdErr)
+						"tenant", tenant.ID, "schedule", schedule.ID, "execution", claimCmd.ID, "err", cmdErr)
 				}
 				continue
 			}
@@ -427,12 +570,14 @@ func (w *Worker) runTick(ctx context.Context) error {
 					continue // skip this Execution; try again next tick
 				}
 				executeRetry := inFlightTask{
-					exec:     *exec,
-					schedule: schedule,
-					wg:       &wg,
-					kind:     KindRetry,
-					ctx:      ctx,
-					proposer: w.proposer,
+					exec:       *exec,
+					schedule:   schedule,
+					wg:         &wg,
+					kind:       KindRetry,
+					ctx:        ctx,
+					proposer:   w.proposer,
+					httpClient: w.httpClient,
+					logger:     w.logger,
 				}
 				wg.Add(1)
 				w.taskCh <- executeRetry
@@ -444,6 +589,8 @@ func (w *Worker) runTick(ctx context.Context) error {
 					kind:     KindTimeout,
 					ctx:      ctx,
 					proposer: w.proposer,
+					// httpClient not needed for timeout tasks — no HTTP call on this path
+					logger: w.logger,
 				}
 				wg.Add(1)
 				w.taskCh <- executeTimeout

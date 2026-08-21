@@ -21,6 +21,7 @@ const (
 	ExecutionStatusFailedTerminal   ExecutionStatus = "failed_terminal"
 	ExecutionStatusFailedMaxRetries ExecutionStatus = "failed_max_retries"
 )
+const FinalOutcomeTimedOut = "timed out"
 
 type Execution struct {
 	SchemaVersion  int             `json:"schema_version"`
