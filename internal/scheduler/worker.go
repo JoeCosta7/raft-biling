@@ -37,8 +37,15 @@ const timeoutThreshold = 5 * time.Minute
 // TODO httpClientTimeout value needs to be figured out
 const httpClientTimeout = 30 * time.Second
 
+// TODO poolSize value needs to be figured out
+const poolSize = 8
+
 // responseExcerptLimit bounds how much of a callback response body is retained on an Attempt.
 const responseExcerptLimit = 4096
+
+type Task interface {
+	run(ctx context.Context) error
+}
 
 type inFlightTaskKind string
 
@@ -50,9 +57,7 @@ const (
 type inFlightTask struct {
 	exec       model.Execution
 	schedule   *model.Schedule
-	wg         *sync.WaitGroup
 	kind       inFlightTaskKind
-	ctx        context.Context
 	proposer   Proposer
 	httpClient *http.Client
 	logger     *slog.Logger
@@ -62,8 +67,6 @@ type freshFireTask struct {
 	schedule   *model.Schedule
 	exec       model.Execution
 	nodeID     string
-	wg         *sync.WaitGroup
-	ctx        context.Context
 	proposer   Proposer
 	httpClient *http.Client
 	logger     *slog.Logger
@@ -122,7 +125,8 @@ type Worker struct {
 	proposer   Proposer
 	nodeID     string
 	logger     *slog.Logger
-	taskCh     chan any
+	taskCh     chan Task
+	wg         sync.WaitGroup
 	httpClient *http.Client
 }
 
@@ -132,7 +136,7 @@ func NewWorker(reader Reader, proposer Proposer, logger *slog.Logger) *Worker {
 		proposer:   proposer,
 		nodeID:     proposer.ID(),
 		logger:     logger,
-		taskCh:     make(chan any, 256),
+		taskCh:     make(chan Task, 256),
 		httpClient: &http.Client{Timeout: httpClientTimeout},
 	}
 }
@@ -141,10 +145,38 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err := w.runRecover(ctx); err != nil {
 		return err
 	}
-	if err := w.steadyState(ctx); err != nil {
-		return err
+
+	var poolWg sync.WaitGroup
+	poolWg.Add(poolSize)
+	for range poolSize {
+		go func() {
+			defer poolWg.Done()
+			w.runPool(ctx)
+		}()
 	}
-	return nil
+
+	err := w.steadyState(ctx)
+	close(w.taskCh)
+	poolWg.Wait()
+	return err
+}
+
+func (w *Worker) runPool(ctx context.Context) {
+	for task := range w.taskCh {
+		w.runTask(ctx, task)
+	}
+}
+
+func (w *Worker) runTask(ctx context.Context, task Task) {
+	defer w.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("task panicked", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	if err := task.run(ctx); err != nil {
+		w.logger.Error("task failed", "err", err)
+	}
 }
 
 func (t *freshFireTask) run(ctx context.Context) error {
@@ -239,29 +271,20 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	return nil
 }
 
-func (t *inFlightTask) run(ctx context.Context) {
-	defer t.wg.Done()
-
+func (t *inFlightTask) run(ctx context.Context) error {
 	execID := t.exec.ID
 
 	if err := ctx.Err(); err != nil {
-		t.logger.Warn("in-flight task not started: context already cancelled",
-			"kind", t.kind, "execution", execID, "err", err)
-		return
+		return err
 	}
 
-	var err error
 	switch t.kind {
 	case KindRetry:
-		err = t.runRetry(ctx, execID)
+		return t.runRetry(ctx, execID)
 	case KindTimeout:
-		err = t.runTimeout(execID)
+		return t.runTimeout(execID)
 	default:
-		t.logger.Error("inFlightTask: unhandled kind", "kind", t.kind, "execution", execID)
-		return
-	}
-	if err != nil {
-		t.logger.Error("in-flight task failed", "kind", t.kind, "execution", execID, "err", err)
+		return fmt.Errorf("inFlightTask: unhandled kind %q for execution %s", t.kind, execID)
 	}
 }
 
@@ -478,7 +501,6 @@ func (w *Worker) steadyState(ctx context.Context) error {
 }
 
 func (w *Worker) runTick(ctx context.Context) error {
-	var wg sync.WaitGroup
 	tenants, err := w.reader.ListTenants()
 	if err != nil {
 		return fmt.Errorf("list tenants: %w", err)
@@ -504,10 +526,6 @@ func (w *Worker) runTick(ctx context.Context) error {
 				continue
 			}
 			scheduledFor := *schedule.NextRunAt
-			// Claim here, before the task is constructed, so the (possibly slow) HTTP
-			// dispatch in freshFireTask.run never holds up a Raft round-trip, and a
-			// losing race against another node's scan is resolved cheaply — as a
-			// rejected claim — rather than after paying for an HTTP call.
 			claimCmd := command.ClaimExecutionCommand{
 				ID:           ulid.Make().String(),
 				TenantID:     tenant.ID,
@@ -523,8 +541,6 @@ func (w *Worker) runTick(ctx context.Context) error {
 			}
 			if cmdErr := asCommandError(result); cmdErr != nil {
 				if cmdErr.Kind == command.KindConflict {
-					// Another node's scan already claimed this occurrence — expected
-					// under concurrent scanning, not a failure.
 					w.logger.Info("execution already claimed for schedule occurrence",
 						"tenant", tenant.ID, "schedule", schedule.ID, "scheduled_for", scheduledFor)
 				} else {
@@ -539,17 +555,15 @@ func (w *Worker) runTick(ctx context.Context) error {
 					"tenant", tenant.ID, "schedule", schedule.ID)
 				continue
 			}
-			dispatch := freshFireTask{
+			dispatch := &freshFireTask{
 				schedule:   schedule,
 				exec:       *claimedExec,
 				nodeID:     w.nodeID,
-				wg:         &wg,
-				ctx:        ctx,
 				proposer:   w.proposer,
 				httpClient: w.httpClient,
 				logger:     w.logger,
 			}
-			wg.Add(1)
+			w.wg.Add(1)
 			w.taskCh <- dispatch
 		}
 		//in-flight-scan
@@ -569,34 +583,30 @@ func (w *Worker) runTick(ctx context.Context) error {
 						"tenant", tenant.ID, "execution", exec.ID, "schedule", exec.ScheduleID, "err", err)
 					continue // skip this Execution; try again next tick
 				}
-				executeRetry := inFlightTask{
+				executeRetry := &inFlightTask{
 					exec:       *exec,
 					schedule:   schedule,
-					wg:         &wg,
 					kind:       KindRetry,
-					ctx:        ctx,
 					proposer:   w.proposer,
 					httpClient: w.httpClient,
 					logger:     w.logger,
 				}
-				wg.Add(1)
+				w.wg.Add(1)
 				w.taskCh <- executeRetry
 			} else if exec.ClaimedAt != nil && time.Since(*exec.ClaimedAt) > timeoutThreshold {
-				executeTimeout := inFlightTask{
+				executeTimeout := &inFlightTask{
 					exec:     *exec,
 					schedule: nil, // schedule is not needed for timeout tasks
-					wg:       &wg,
 					kind:     KindTimeout,
-					ctx:      ctx,
 					proposer: w.proposer,
 					// httpClient not needed for timeout tasks — no HTTP call on this path
 					logger: w.logger,
 				}
-				wg.Add(1)
+				w.wg.Add(1)
 				w.taskCh <- executeTimeout
 			}
 		}
 	}
-	wg.Wait()
+	w.wg.Wait()
 	return nil
 }
