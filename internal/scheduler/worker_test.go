@@ -2,15 +2,21 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"raft-biling/internal/command"
 	"raft-biling/internal/model"
+	"raft-biling/internal/storage"
 )
 
 type fakeReader struct {
@@ -52,29 +58,249 @@ func (f *fakeReader) GetSchedule(tenantID, id string) (*model.Schedule, error) {
 	return nil, nil
 }
 
+func ptrTime(t time.Time) *time.Time { return &t }
+
+type boltReader struct {
+	store storage.Storage
+}
+
+func (r *boltReader) ListTenants() ([]*model.Tenant, error) {
+	var tenants []*model.Tenant
+	err := r.store.View(func(tx storage.Tx) error {
+		ts, err := tx.ListTenants()
+		if err != nil {
+			return err
+		}
+		tenants = ts
+		return nil
+	})
+	return tenants, err
+}
+
+func (r *boltReader) GetSchedule(tenantID, id string) (*model.Schedule, error) {
+	var schedule *model.Schedule
+	err := r.store.View(func(tx storage.Tx) error {
+		s, err := tx.GetSchedule(tenantID, id)
+		if err != nil {
+			return err
+		}
+		schedule = s
+		return nil
+	})
+	return schedule, err
+}
+
+func (r *boltReader) ListSchedulesDue(tenantID string) ([]*model.Schedule, error) {
+	return nil, nil
+}
+
+func (r *boltReader) ListExecutionsByStatus(tenantID string, status model.ExecutionStatus) ([]*model.Execution, error) {
+	var execs []*model.Execution
+	err := r.store.View(func(tx storage.Tx) error {
+		return tx.ListExecutionsByStatus(tenantID, status, func(ex *model.Execution) error {
+			execs = append(execs, ex)
+			return nil
+		})
+	})
+	return execs, err
+}
+
+func (r *boltReader) ListAttemptsByExecution(tenantID, executionID string) ([]*model.Attempt, error) {
+	var attempts []*model.Attempt
+	err := r.store.View(func(tx storage.Tx) error {
+		return tx.ListAttemptsByExecution(tenantID, executionID, func(a *model.Attempt) error {
+			attempts = append(attempts, a)
+			return nil
+		})
+	})
+	return attempts, err
+}
+
+func (r *boltReader) GetExecution(tenantID, id string) (*model.Execution, error) {
+	var exec *model.Execution
+	err := r.store.View(func(tx storage.Tx) error {
+		ex, err := tx.GetExecution(tenantID, id)
+		if err != nil {
+			return err
+		}
+		exec = ex
+		return nil
+	})
+	return exec, err
+}
+
 type proposal struct {
 	cmdType string
 	cmd     any
 	timeout time.Duration
 }
 
-type fakeProposer struct {
-	calls []proposal
-	err   error
-	id    string
+type applyingProposer struct {
+	store    storage.Storage
+	nodeID   string
+	forceErr error // when set, Propose fails before ever touching store or calls — for exercising the transport-error path
+	mu       sync.Mutex
+	calls    []proposal
 }
 
-func (f *fakeProposer) Propose(cmdType string, cmd any, timeout time.Duration) (any, error) {
-	if f.err != nil {
-		return nil, f.err
+func newApplyingProposer(t *testing.T, nodeID string) *applyingProposer {
+	t.Helper()
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
 	}
-	f.calls = append(f.calls, proposal{cmdType: cmdType, cmd: cmd, timeout: timeout})
-	return nil, nil
+	t.Cleanup(func() { store.Close() })
+	return &applyingProposer{store: store, nodeID: nodeID}
 }
 
-func (f *fakeProposer) ID() string { return f.id }
+func (p *applyingProposer) ID() string                { return p.nodeID }
+func (p *applyingProposer) TransferLeadership() error { return nil }
 
-func (f *fakeProposer) TransferLeadership() error { return nil }
+func (p *applyingProposer) Propose(cmdType string, cmd any, timeout time.Duration) (any, error) {
+	if p.forceErr != nil {
+		return nil, p.forceErr
+	}
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s: %w", cmdType, err)
+	}
+
+	p.mu.Lock()
+	p.calls = append(p.calls, proposal{cmdType: cmdType, cmd: cmd, timeout: timeout})
+	p.mu.Unlock()
+
+	var result any
+	err = p.store.Update(func(tx storage.Tx) error {
+		r, e := command.Dispatch(tx, cmdType, payload, time.Now())
+		result = r
+		return e
+	})
+	var cmdErr *command.CommandError
+	if errors.As(err, &cmdErr) {
+		return cmdErr, nil // CommandError as result, not error — mirrors real Apply
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func TestWorker_KindRetryWritesLastRetryAt(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		priorOwner = "prior-leader"
+		selfNodeID = "test-node"
+	)
+
+	requestCount := 0
+	var mu sync.Mutex
+	firstRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		n := requestCount
+		mu.Unlock()
+		if n == 1 {
+			close(firstRequest)
+		}
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+
+	// storage
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	// pre-populate
+	prePopulatedLastRetry := time.Now().Add(-5 * time.Minute)
+	err = store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+		if err := tx.PutSchedule(&model.Schedule{
+			TenantID:     tenantID,
+			ID:           scheduleID,
+			CallbackURL:  server.URL,
+			Payload:      []byte("{}"),
+			MaxAttempts:  3,
+			RetryBackoff: model.RetryBackoff{Initial: 100 * time.Millisecond, Multiplier: 1},
+			// NextRunAt: nil — keeps fresh-fire scan uninteresting
+		}); err != nil {
+			return err
+		}
+		return tx.PutExecution(&model.Execution{
+			TenantID:     tenantID,
+			ID:           execID,
+			ScheduleID:   scheduleID,
+			Status:       model.ExecutionStatusInFlight,
+			OwnerNodeID:  priorOwner,
+			AttemptCount: 1,
+			LastRetryAt:  &prePopulatedLastRetry,
+			ClaimedAt:    ptrTime(time.Now().Add(-1 * time.Minute)),
+		})
+	})
+	if err != nil {
+		t.Fatalf("pre-populate: %v", err)
+	}
+
+	// scaffold
+	reader := &boltReader{store: store}
+	proposer := &applyingProposer{store: store, nodeID: selfNodeID}
+	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
+	w.tickInterval = 20 * time.Millisecond
+	w.poolSize = 1
+
+	// run
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- w.Run(ctx) }()
+
+	// wait for the first HTTP request (business attempt #2, since AttemptCount starts at 1)
+	select {
+	case <-firstRequest:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first HTTP request did not arrive within 5s")
+	}
+
+	// poll for that request's RecordAttempt to land
+	deadline := time.Now().Add(1 * time.Second)
+	var exec *model.Execution
+	for time.Now().Before(deadline) {
+		exec, err = reader.GetExecution(tenantID, execID)
+		if err == nil && exec != nil && exec.AttemptCount == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if exec == nil || exec.AttemptCount != 2 {
+		t.Fatalf("execution never reached AttemptCount=2; got %+v", exec)
+	}
+
+	// LOAD-BEARING ASSERTION
+	if exec.LastRetryAt == nil {
+		t.Fatal("LastRetryAt is nil after attempt 2 — KindRetry regression: RecordAttempt did not write LastRetryAt")
+	}
+	if !exec.LastRetryAt.After(prePopulatedLastRetry) {
+		t.Errorf("LastRetryAt not advanced: got %v, want > %v", exec.LastRetryAt, prePopulatedLastRetry)
+	}
+
+	// teardown
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of ctx cancel")
+	}
+}
 
 func TestClassifyOne_EmptyAttempts(t *testing.T) {
 	bucket, err := classifyOne(model.Execution{}, nil, time.Now())
@@ -298,7 +524,7 @@ func TestRunRecover_Buckets(t *testing.T) {
 					execID: tc.attempts,
 				},
 			}
-			proposer := &fakeProposer{id: nodeID}
+			proposer := newApplyingProposer(t, nodeID)
 			w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 			if err := w.runRecover(context.Background()); err != nil {
@@ -321,7 +547,7 @@ func TestRunRecover_Buckets(t *testing.T) {
 
 func TestRunRecover_ListTenantsError(t *testing.T) {
 	reader := &fakeReader{listTenantsErr: errors.New("boom")}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())
@@ -342,7 +568,7 @@ func TestRunRecover_ListExecutionsError(t *testing.T) {
 		tenants:           []*model.Tenant{{ID: tenantID}},
 		listExecutionsErr: map[string]error{tenantID: errors.New("boom")},
 	}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())
@@ -369,7 +595,7 @@ func TestRunRecover_ListAttemptsError(t *testing.T) {
 		},
 		listAttemptsErr: map[string]error{execID: errors.New("boom")},
 	}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())
@@ -396,7 +622,8 @@ func TestRunRecover_ProposeError(t *testing.T) {
 		},
 		attemptsByExec: map[string][]*model.Attempt{execID: nil}, // BucketNoAttempts -> adopt path
 	}
-	proposer := &fakeProposer{id: "node-self", err: errors.New("boom")}
+	proposer := newApplyingProposer(t, "node-self")
+	proposer.forceErr = errors.New("boom")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())
@@ -413,7 +640,7 @@ func TestRunRecover_ContextCancelled(t *testing.T) {
 	reader := &fakeReader{
 		tenants: []*model.Tenant{{ID: tenantID}},
 	}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -442,7 +669,7 @@ func TestRunRecover_ClassificationError(t *testing.T) {
 			execID: {{Outcome: model.AttemptOutcome("bogus_outcome")}},
 		},
 	}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())
@@ -471,7 +698,7 @@ func TestRunRecover_PanicRecovery(t *testing.T) {
 			execID: {nil}, // classifyOne dereferences the last element -> nil pointer panic
 		},
 	}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())
@@ -501,7 +728,7 @@ func TestRunRecover_MultiTenant_ErrorOnSecondTenant(t *testing.T) {
 			tenantB: errors.New("boom"),
 		},
 	}
-	proposer := &fakeProposer{id: "node-self"}
+	proposer := newApplyingProposer(t, "node-self")
 	w := NewWorker(reader, proposer, slog.New(slog.DiscardHandler))
 
 	err := w.runRecover(context.Background())

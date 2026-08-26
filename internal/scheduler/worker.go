@@ -37,8 +37,11 @@ const timeoutThreshold = 5 * time.Minute
 // TODO httpClientTimeout value needs to be figured out
 const httpClientTimeout = 30 * time.Second
 
-// TODO poolSize value needs to be figured out
-const poolSize = 8
+// TODO defaultPoolSize value needs to be figured out
+const defaultPoolSize = 8
+
+// TODO defaultTickInterval value needs to be figured out
+const defaultTickInterval = 5 * time.Second
 
 // responseExcerptLimit bounds how much of a callback response body is retained on an Attempt.
 const responseExcerptLimit = 4096
@@ -121,23 +124,27 @@ func classifyOne(exec model.Execution, attempts []*model.Attempt, now time.Time)
 }
 
 type Worker struct {
-	reader     Reader
-	proposer   Proposer
-	nodeID     string
-	logger     *slog.Logger
-	taskCh     chan Task
-	wg         sync.WaitGroup
-	httpClient *http.Client
+	reader       Reader
+	proposer     Proposer
+	nodeID       string
+	logger       *slog.Logger
+	taskCh       chan Task
+	wg           sync.WaitGroup
+	httpClient   *http.Client
+	tickInterval time.Duration
+	poolSize     int
 }
 
 func NewWorker(reader Reader, proposer Proposer, logger *slog.Logger) *Worker {
 	return &Worker{
-		reader:     reader,
-		proposer:   proposer,
-		nodeID:     proposer.ID(),
-		logger:     logger,
-		taskCh:     make(chan Task, 256),
-		httpClient: &http.Client{Timeout: httpClientTimeout},
+		reader:       reader,
+		proposer:     proposer,
+		nodeID:       proposer.ID(),
+		logger:       logger,
+		taskCh:       make(chan Task, 256),
+		httpClient:   &http.Client{Timeout: httpClientTimeout},
+		tickInterval: defaultTickInterval,
+		poolSize:     defaultPoolSize,
 	}
 }
 
@@ -147,8 +154,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	var poolWg sync.WaitGroup
-	poolWg.Add(poolSize)
-	for range poolSize {
+	poolWg.Add(w.poolSize)
+	for range w.poolSize {
 		go func() {
 			defer poolWg.Done()
 			w.runPool(ctx)
@@ -441,6 +448,11 @@ func (w *Worker) runRecover(ctx context.Context) (err error) {
 	return nil
 }
 
+// TODO every branch below discards the Propose result and only checks the transport-level
+// error, so a CommandError (NotFound, Conflict, Validation) from Dispatch is silently treated
+// as success — e.g. recovering an Execution the state machine no longer has (leader restarted
+// after a state-machine change) would report as adopted/completed when it wasn't. Rare but real;
+// each branch needs an asCommandError(result) check like freshFireTask.run() already does.
 func (w *Worker) adoptOrComplete(ctx context.Context, tenant model.Tenant, exec model.Execution, bucket Bucket) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -485,8 +497,7 @@ func (w *Worker) adoptOrComplete(ctx context.Context, tenant model.Tenant, exec 
 }
 
 func (w *Worker) steadyState(ctx context.Context) error {
-	//TODO ticker value needs to be figured out
-	ticker := time.NewTicker(time.Second * 5)
+	ticker := time.NewTicker(w.tickInterval)
 	defer ticker.Stop()
 	for {
 		select {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -31,219 +30,20 @@ func (sm *StateMachine) Apply(log *raft.Log) any {
 	if err := json.Unmarshal(log.Data, &envelope); err != nil {
 		panic(err)
 	}
-	switch envelope.Type {
-	case "create_tenant":
-		var cmd command.CreateTenantCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyCreateTenant(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "create_schedule":
-		var cmd command.CreateScheduleCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyCreateSchedule(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "update_schedule":
-		var cmd command.UpdateScheduleCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyUpdateSchedule(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "pause_schedule":
-		var cmd command.PauseScheduleCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyPauseSchedule(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "cancel_schedule":
-		var cmd command.CancelScheduleCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyCancelSchedule(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "resume_schedule":
-		var cmd command.ResumeScheduleCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyResumeSchedule(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "claim_execution":
-		var cmd command.ClaimExecutionCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyClaimExecution(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "adopt_execution":
-		var cmd command.AdoptExecutionCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyTransferExecution(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "record_attempt":
-		var cmd command.RecordAttemptCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyRecordAttempt(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "complete_execution":
-		var cmd command.CompleteExecutionCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyCompleteExecution(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	case "fail_execution_timeout":
-		var cmd command.FailExecutionTimeoutCommand
-		if err := json.Unmarshal(envelope.Payload, &cmd); err != nil {
-			panic(err)
-		}
-		var result any
-		err := sm.storage.Update(func(tx storage.Tx) error {
-			res, herr := command.ApplyFailExecutionTimeout(tx, cmd, envelope.ProposedAt)
-			result = res
-			return herr
-		})
-		var cmdErr *command.CommandError
-		if errors.As(err, &cmdErr) {
-			return cmdErr
-		}
-		if err != nil {
-			panic(err)
-		}
-		return result
-	default:
-		panic(fmt.Sprintf("unknown log entry type: %q", envelope.Type))
+	var result any
+	err := sm.storage.Update(func(tx storage.Tx) error {
+		res, herr := command.Dispatch(tx, envelope.Type, envelope.Payload, envelope.ProposedAt)
+		result = res
+		return herr
+	})
+	var cmdErr *command.CommandError
+	if errors.As(err, &cmdErr) {
+		return cmdErr
 	}
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
 func (sm *StateMachine) Storage() storage.Storage {
