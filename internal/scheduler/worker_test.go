@@ -225,6 +225,7 @@ func TestWorker_KindRetryWritesLastRetryAt(t *testing.T) {
 		if err := tx.PutSchedule(&model.Schedule{
 			TenantID:     tenantID,
 			ID:           scheduleID,
+			Status:       model.ScheduleStatusActive,
 			CallbackURL:  server.URL,
 			Payload:      []byte("{}"),
 			MaxAttempts:  3,

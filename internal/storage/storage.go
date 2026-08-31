@@ -341,7 +341,7 @@ func (t *boltTx) ListAttemptsByExecution(tenantID, executionID string, fn func(*
 //Cancel Schedule, get to check if schedule exists, then use Put to set status to canceled
 //Internal Commands
 //Claim Exectuion, check whether exectuion already exists, create if not already existing, set owner
-//Transfer Execuiotn, use put to set new owner and update claimed_at
+//Adopt Execution, use put to set new owner and update claimed_at
 //RecordAttempt appends Attempt row, calls put execution to updates parent's attempt count and last_attempt_id. Maybe need another function for proposer verification
 //CompleteExecution, use put to update Execution & clear owner node id. Also put to schedule to advance next_run_at.
 //FailExecutionTimeout, use put to update execution failed with timeout reasoning

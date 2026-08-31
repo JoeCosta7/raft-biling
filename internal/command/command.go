@@ -73,7 +73,7 @@ func Dispatch(tx storage.Tx, cmdType string, payload json.RawMessage, proposedAt
 		if err := json.Unmarshal(payload, &cmd); err != nil {
 			return nil, err
 		}
-		return ApplyTransferExecution(tx, cmd, proposedAt)
+		return ApplyAdoptExecution(tx, cmd, proposedAt)
 	case "record_attempt":
 		var cmd RecordAttemptCommand
 		if err := json.Unmarshal(payload, &cmd); err != nil {

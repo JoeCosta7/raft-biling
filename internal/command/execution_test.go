@@ -311,12 +311,12 @@ func TestApplyAdoptExecution_HappyPath(t *testing.T) {
 	cmd := newTestAdoptExecutionCommand()
 	proposedAt := testTime.Add(6 * time.Minute)
 
-	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	got, err := ApplyAdoptExecution(tx, *cmd, proposedAt)
 	if err != nil {
-		t.Fatalf("ApplyTransferExecution: unexpected error: %v", err)
+		t.Fatalf("ApplyAdoptExecution: unexpected error: %v", err)
 	}
 	if got == nil {
-		t.Fatal("ApplyTransferExecution: returned nil execution with nil error")
+		t.Fatal("ApplyAdoptExecution: returned nil execution with nil error")
 	}
 	if got.OwnerNodeID != testNewOwner {
 		t.Errorf("OwnerNodeID: got %q, want %q", got.OwnerNodeID, testNewOwner)
@@ -353,7 +353,7 @@ func TestApplyAdoptExecution_SelfAdoption(t *testing.T) {
 	})
 	proposedAt := testTime
 
-	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	got, err := ApplyAdoptExecution(tx, *cmd, proposedAt)
 	if got != nil {
 		t.Errorf("execution: got %v, want nil", got)
 	}
@@ -381,7 +381,7 @@ func TestApplyAdoptExecution_NotInFlight(t *testing.T) {
 	cmd := newTestAdoptExecutionCommand()
 	proposedAt := testTime.Add(6 * time.Minute)
 
-	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	got, err := ApplyAdoptExecution(tx, *cmd, proposedAt)
 	if got != nil {
 		t.Errorf("execution: got %v, want nil", got)
 	}
@@ -411,7 +411,7 @@ func TestApplyAdoptExecution_PreviousOwnerMismatch(t *testing.T) {
 	cmd := newTestAdoptExecutionCommand()
 	proposedAt := testTime.Add(6 * time.Minute)
 
-	got, err := ApplyTransferExecution(tx, *cmd, proposedAt)
+	got, err := ApplyAdoptExecution(tx, *cmd, proposedAt)
 	if got != nil {
 		t.Errorf("execution: got %v, want nil", got)
 	}

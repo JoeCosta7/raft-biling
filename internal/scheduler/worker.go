@@ -31,9 +31,6 @@ const (
 // proposeTimeout bounds how long a single recovery-driven Propose call waits.
 const proposeTimeout = 5 * time.Second
 
-// TODO timeoutThreshold value needs to be figured out
-const timeoutThreshold = 5 * time.Minute
-
 // TODO httpClientTimeout value needs to be figured out
 const httpClientTimeout = 30 * time.Second
 
@@ -53,13 +50,15 @@ type Task interface {
 type inFlightTaskKind string
 
 const (
-	KindRetry   inFlightTaskKind = "retry"
-	KindTimeout inFlightTaskKind = "timeout"
+	KindRetry    inFlightTaskKind = "retry"
+	KindTimeout  inFlightTaskKind = "timeout"
+	KindFinalize inFlightTaskKind = "finalize"
 )
 
 type inFlightTask struct {
 	exec       model.Execution
 	schedule   *model.Schedule
+	reader     Reader
 	kind       inFlightTaskKind
 	proposer   Proposer
 	httpClient *http.Client
@@ -70,6 +69,7 @@ type freshFireTask struct {
 	schedule   *model.Schedule
 	exec       model.Execution
 	nodeID     string
+	reader     Reader
 	proposer   Proposer
 	httpClient *http.Client
 	logger     *slog.Logger
@@ -191,6 +191,23 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	schedule, err := t.reader.GetSchedule(t.exec.TenantID, t.exec.ScheduleID)
+	if err != nil {
+		t.logger.Error("fresh-fire schedule read failed",
+			"execution", execID, "schedule", t.exec.ScheduleID, "err", err)
+		return fmt.Errorf("get schedule for execution %s: %w", execID, err)
+	}
+	if schedule == nil {
+		t.logger.Error("fresh-fire schedule not found",
+			"execution", execID, "schedule", t.exec.ScheduleID)
+		return nil
+	}
+	if schedule.Status != model.ScheduleStatusActive {
+		t.logger.Warn("skipping fresh-fire dispatch: schedule not active — execution remains in-flight with no attempt recorded; no automatic mechanism currently resolves this orphan",
+			"execution", execID, "schedule", schedule.ID, "status", schedule.Status)
+		return nil
+	}
+	t.schedule = schedule
 	attemptID := ulid.Make().String()
 	startedAt := time.Now()
 	body := t.schedule.Payload
@@ -290,9 +307,58 @@ func (t *inFlightTask) run(ctx context.Context) error {
 		return t.runRetry(ctx, execID)
 	case KindTimeout:
 		return t.runTimeout(execID)
+	case KindFinalize:
+		return t.runFinalize(execID)
 	default:
 		return fmt.Errorf("inFlightTask: unhandled kind %q for execution %s", t.kind, execID)
 	}
+}
+
+func (t *inFlightTask) runFinalize(execID string) error {
+	attempts, err := t.reader.ListAttemptsByExecution(t.exec.TenantID, execID)
+	if err != nil {
+		return fmt.Errorf("list attempts for execution %s: %w", execID, err)
+	}
+	if len(attempts) == 0 {
+		t.logger.Error("finalize task found no attempts for execution with non-empty LastAttemptID",
+			"execution", execID)
+		return nil
+	}
+	lastOutcome := attempts[len(attempts)-1].Outcome
+
+	var finalStatus model.ExecutionStatus
+	var finalOutcome string
+	switch lastOutcome {
+	case model.OutcomeSuccess:
+		finalStatus = model.ExecutionStatusSucceeded
+		finalOutcome = string(model.OutcomeSuccess)
+	case model.OutcomeTerminalFailure:
+		finalStatus = model.ExecutionStatusFailedTerminal
+		finalOutcome = string(model.OutcomeTerminalFailure)
+	default:
+		t.logger.Error("finalize task found non-terminal last attempt outcome",
+			"execution", execID, "outcome", lastOutcome)
+		return nil
+	}
+
+	cmd := command.CompleteExecutionCommand{
+		TenantID:     t.exec.TenantID,
+		ExecutionID:  execID,
+		FinalStatus:  finalStatus,
+		FinalOutcome: finalOutcome,
+	}
+	result, err := t.proposer.Propose("complete_execution", cmd, proposeTimeout)
+	if err != nil {
+		return fmt.Errorf("propose complete for execution %s: %w", execID, err)
+	}
+	if cmdErr := asCommandError(result); cmdErr != nil {
+		if cmdErr.Kind == command.KindConflict {
+			t.logger.Info("execution already finalized elsewhere", "execution", execID)
+			return nil
+		}
+		return fmt.Errorf("complete execution rejected for execution %s: %w", execID, cmdErr)
+	}
+	return nil
 }
 
 func (t *inFlightTask) runTimeout(execID string) error {
@@ -317,6 +383,23 @@ func (t *inFlightTask) runTimeout(execID string) error {
 }
 
 func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
+	schedule, err := t.reader.GetSchedule(t.exec.TenantID, t.exec.ScheduleID)
+	if err != nil {
+		t.logger.Error("retry schedule read failed",
+			"execution", execID, "schedule", t.exec.ScheduleID, "err", err)
+		return fmt.Errorf("get schedule for execution %s: %w", execID, err)
+	}
+	if schedule == nil {
+		t.logger.Error("retry schedule not found",
+			"execution", execID, "schedule", t.exec.ScheduleID)
+		return nil
+	}
+	if schedule.Status != model.ScheduleStatusActive {
+		t.logger.Warn("skipping retry dispatch: schedule not active",
+			"execution", execID, "schedule", schedule.ID, "status", schedule.Status)
+		return nil
+	}
+	t.schedule = schedule
 	attemptID := ulid.Make().String()
 	startedAt := time.Now()
 	body := t.schedule.Payload
@@ -570,6 +653,7 @@ func (w *Worker) runTick(ctx context.Context) error {
 				schedule:   schedule,
 				exec:       *claimedExec,
 				nodeID:     w.nodeID,
+				reader:     w.reader,
 				proposer:   w.proposer,
 				httpClient: w.httpClient,
 				logger:     w.logger,
@@ -587,6 +671,18 @@ func (w *Worker) runTick(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if exec.LastAttemptID != "" && exec.LastRetryAt == nil {
+				finalize := &inFlightTask{
+					exec:     *exec,
+					reader:   w.reader,
+					kind:     KindFinalize,
+					proposer: w.proposer,
+					logger:   w.logger,
+				}
+				w.wg.Add(1)
+				w.taskCh <- finalize
+				continue
+			}
 			if exec.LastRetryAt != nil && !exec.LastRetryAt.After(time.Now()) {
 				schedule, err := w.reader.GetSchedule(tenant.ID, exec.ScheduleID)
 				if err != nil {
@@ -597,6 +693,7 @@ func (w *Worker) runTick(ctx context.Context) error {
 				executeRetry := &inFlightTask{
 					exec:       *exec,
 					schedule:   schedule,
+					reader:     w.reader,
 					kind:       KindRetry,
 					proposer:   w.proposer,
 					httpClient: w.httpClient,
@@ -604,17 +701,6 @@ func (w *Worker) runTick(ctx context.Context) error {
 				}
 				w.wg.Add(1)
 				w.taskCh <- executeRetry
-			} else if exec.ClaimedAt != nil && time.Since(*exec.ClaimedAt) > timeoutThreshold {
-				executeTimeout := &inFlightTask{
-					exec:     *exec,
-					schedule: nil, // schedule is not needed for timeout tasks
-					kind:     KindTimeout,
-					proposer: w.proposer,
-					// httpClient not needed for timeout tasks — no HTTP call on this path
-					logger: w.logger,
-				}
-				w.wg.Add(1)
-				w.taskCh <- executeTimeout
 			}
 		}
 	}

@@ -103,7 +103,7 @@ func ApplyClaimExecution(tx storage.Tx, cmd ClaimExecutionCommand, proposedAt ti
 		}
 	}
 	ex := &model.Execution{
-		SchemaVersion:  model.CurrentScheduleSchemaVersion,
+		SchemaVersion:  model.CurrentExecutionSchemaVersion,
 		ID:             cmd.ID,
 		TenantID:       cmd.TenantID,
 		ScheduleID:     cmd.ScheduleID,
@@ -124,7 +124,7 @@ func ApplyClaimExecution(tx storage.Tx, cmd ClaimExecutionCommand, proposedAt ti
 	return ex, nil
 }
 
-func ApplyTransferExecution(tx storage.Tx, cmd AdoptExecutionCommand, proposedAt time.Time) (*model.Execution, error) {
+func ApplyAdoptExecution(tx storage.Tx, cmd AdoptExecutionCommand, proposedAt time.Time) (*model.Execution, error) {
 	if cmd.TenantID == "" {
 		return nil, &CommandError{Kind: KindValidation, Field: "tenant_id", Message: "tenant_id is missing"}
 	}
@@ -285,9 +285,11 @@ func ApplyCompleteExecution(tx storage.Tx, cmd CompleteExecutionCommand, propose
 	}
 	newSchedule := *schedule
 	if newSchedule.ScheduleType == model.ScheduleTypeRecurring {
-		newSchedule.NextRunAt, err = model.ComputeNextRunAfter(newSchedule.Recurrence, "UTC", newSchedule.FirstRunAt, exec.ScheduledFor)
-		if err != nil {
-			return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: "next run at could now be found"}
+		if newSchedule.Status == model.ScheduleStatusActive {
+			newSchedule.NextRunAt, err = model.ComputeNextRunAfter(newSchedule.Recurrence, "UTC", newSchedule.FirstRunAt, exec.ScheduledFor)
+			if err != nil {
+				return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: "next run at could now be found"}
+			}
 		}
 	} else {
 		newSchedule.Status = model.ScheduleStatusCompleted
@@ -336,9 +338,11 @@ func ApplyFailExecutionTimeout(tx storage.Tx, cmd FailExecutionTimeoutCommand, p
 	}
 	newSchedule := *schedule
 	if newSchedule.ScheduleType == model.ScheduleTypeRecurring {
-		newSchedule.NextRunAt, err = model.ComputeNextRunAfter(newSchedule.Recurrence, "UTC", newSchedule.FirstRunAt, exec.ScheduledFor)
-		if err != nil {
-			return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: "next run at could not be found"}
+		if newSchedule.Status == model.ScheduleStatusActive {
+			newSchedule.NextRunAt, err = model.ComputeNextRunAfter(newSchedule.Recurrence, "UTC", newSchedule.FirstRunAt, exec.ScheduledFor)
+			if err != nil {
+				return nil, &CommandError{Kind: KindValidation, Field: "recurrence", Message: "next run at could not be found"}
+			}
 		}
 	} else {
 		newSchedule.Status = model.ScheduleStatusCompleted
