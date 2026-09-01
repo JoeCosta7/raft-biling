@@ -44,8 +44,7 @@ func newTestCreateScheduleCommand(overrides ...func(c *CreateScheduleCommand)) *
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
-		ExecutionTimeout: 5 * time.Minute,
-		CatchUpPolicy:    model.CatchUpPolicyAll,
+		CatchUpPolicy: model.CatchUpPolicyAll,
 	}
 	for _, o := range overrides {
 		o(sch)
@@ -60,9 +59,8 @@ func newTestUpdateScheduleCommand(overrides ...func(*UpdateScheduleCommand)) *Up
 		CallbackURL:      nil,
 		Headers:          nil,
 		Payload:          nil,
-		RetryBackoff:     nil,
-		MaxAttempts:      nil,
-		ExecutionTimeout: nil,
+		RetryBackoff: nil,
+		MaxAttempts:  nil,
 	}
 	for _, o := range overrides {
 		o(cmd)
@@ -303,9 +301,6 @@ func TestApplyUpdateSchedule_HappyPathOneField(t *testing.T) {
 	if schedule.MaxAttempts != preSeed.MaxAttempts {
 		t.Errorf("MaxAttempts: got %d, want %d", schedule.MaxAttempts, preSeed.MaxAttempts)
 	}
-	if schedule.ExecutionTimeout != preSeed.ExecutionTimeout {
-		t.Errorf("ExecutionTimeout: got %v, want %v", schedule.ExecutionTimeout, preSeed.ExecutionTimeout)
-	}
 	if !schedule.UpdatedAt.Equal(proposedAt) {
 		t.Errorf("UpdatedAt: got %v, want %v", schedule.UpdatedAt, proposedAt)
 	}
@@ -350,9 +345,6 @@ func TestApplyUpdateSchedule_HappyPathNoFields(t *testing.T) {
 	}
 	if schedule.MaxAttempts != preSeed.MaxAttempts {
 		t.Errorf("MaxAttempts: got %d, want %d", schedule.MaxAttempts, preSeed.MaxAttempts)
-	}
-	if schedule.ExecutionTimeout != preSeed.ExecutionTimeout {
-		t.Errorf("ExecutionTimeout: got %v, want %v", schedule.ExecutionTimeout, preSeed.ExecutionTimeout)
 	}
 	if !schedule.UpdatedAt.Equal(proposedAt) {
 		t.Errorf("UpdatedAt: got %v, want %v", schedule.UpdatedAt, proposedAt)

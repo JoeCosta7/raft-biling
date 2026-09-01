@@ -165,10 +165,9 @@ func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
-		ExecutionTimeout: 5 * time.Minute,
-		CatchUpPolicy:    model.CatchUpPolicyAll,
-		Status:           model.ScheduleStatusActive,
-		NextRunAt:        &testTime,
+		CatchUpPolicy: model.CatchUpPolicyAll,
+		Status:        model.ScheduleStatusActive,
+		NextRunAt:     &testTime,
 	}
 	for _, o := range overrides {
 		o(sch)
@@ -199,8 +198,7 @@ func newTestPausedSchedule(opts ...func(*model.Schedule)) *model.Schedule {
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
-		ExecutionTimeout: 5 * time.Minute,
-		NextRunAt:        nil,
+		NextRunAt: nil,
 	}
 	for _, opt := range opts {
 		opt(s)

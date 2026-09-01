@@ -746,3 +746,99 @@ func TestRunRecover_MultiTenant_ErrorOnSecondTenant(t *testing.T) {
 		t.Errorf("cmdType: got %q, want %q", proposer.calls[0].cmdType, "adopt_execution")
 	}
 }
+
+// seedActiveSchedule puts a tenant and an active schedule (with an unreachable
+// callback URL) into the given proposer's store, for tests that dispatch a
+// pre-canceled context and never expect a real network call to happen.
+func seedActiveSchedule(t *testing.T, p *applyingProposer, tenantID, scheduleID string) {
+	t.Helper()
+	err := p.store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+		return tx.PutSchedule(&model.Schedule{
+			TenantID:    tenantID,
+			ID:          scheduleID,
+			Status:      model.ScheduleStatusActive,
+			CallbackURL: "http://127.0.0.1:1/unreachable",
+			Payload:     []byte("{}"),
+			MaxAttempts: 3,
+		})
+	})
+	if err != nil {
+		t.Fatalf("seedActiveSchedule: %v", err)
+	}
+}
+
+func TestFreshFireTask_Run_DoErrCanceled_SkipsProposal(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+	)
+
+	proposer := newApplyingProposer(t, nodeID)
+	seedActiveSchedule(t, proposer, tenantID, scheduleID)
+
+	task := &freshFireTask{
+		exec: model.Execution{
+			TenantID:   tenantID,
+			ID:         execID,
+			ScheduleID: scheduleID,
+		},
+		nodeID:     nodeID,
+		reader:     &boltReader{store: proposer.store},
+		proposer:   proposer,
+		httpClient: http.DefaultClient,
+		logger:     slog.New(slog.DiscardHandler),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := task.run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("run: got %v, want context.Canceled", err)
+	}
+	if len(proposer.calls) != 0 {
+		t.Errorf("calls: got %d, want 0 — canceled dispatch must not propose anything", len(proposer.calls))
+	}
+}
+
+func TestInFlightTask_RunRetry_DoErrCanceled_SkipsProposal(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+	)
+
+	proposer := newApplyingProposer(t, nodeID)
+	seedActiveSchedule(t, proposer, tenantID, scheduleID)
+
+	task := &inFlightTask{
+		exec: model.Execution{
+			TenantID:     tenantID,
+			ID:           execID,
+			ScheduleID:   scheduleID,
+			AttemptCount: 1,
+		},
+		kind:       KindRetry,
+		reader:     &boltReader{store: proposer.store},
+		proposer:   proposer,
+		httpClient: http.DefaultClient,
+		logger:     slog.New(slog.DiscardHandler),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := task.run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("run: got %v, want context.Canceled", err)
+	}
+	if len(proposer.calls) != 0 {
+		t.Errorf("calls: got %d, want 0 — canceled dispatch must not propose anything", len(proposer.calls))
+	}
+}

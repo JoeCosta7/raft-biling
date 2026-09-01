@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -221,6 +222,13 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	}
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
+	if errors.Is(doErr, context.Canceled) {
+		// workerCtx was canceled mid-dispatch (shutdown or explicit task cancellation).
+		// No attempt outcome to record — DeadlineExceeded is intentionally NOT caught
+		// here: that means CallTimeout fired on a slow receiver, which is a real
+		// attempt outcome that must still be classified, recorded, and retried.
+		return ctx.Err()
+	}
 	completedAt := time.Now()
 	var respStatus int
 	var respHeaders map[string]string
@@ -413,6 +421,13 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 	}
 	bodyHash := sha256.Sum256(body)
 	resp, doErr := t.httpClient.Do(req)
+	if errors.Is(doErr, context.Canceled) {
+		// workerCtx was canceled mid-dispatch (shutdown or explicit task cancellation).
+		// No attempt outcome to record — DeadlineExceeded is intentionally NOT caught
+		// here: that means CallTimeout fired on a slow receiver, which is a real
+		// attempt outcome that must still be classified, recorded, and retried.
+		return ctx.Err()
+	}
 	completedAt := time.Now()
 	var respStatus int
 	var respHeaders map[string]string
@@ -531,11 +546,6 @@ func (w *Worker) runRecover(ctx context.Context) (err error) {
 	return nil
 }
 
-// TODO every branch below discards the Propose result and only checks the transport-level
-// error, so a CommandError (NotFound, Conflict, Validation) from Dispatch is silently treated
-// as success — e.g. recovering an Execution the state machine no longer has (leader restarted
-// after a state-machine change) would report as adopted/completed when it wasn't. Rare but real;
-// each branch needs an asCommandError(result) check like freshFireTask.run() already does.
 func (w *Worker) adoptOrComplete(ctx context.Context, tenant model.Tenant, exec model.Execution, bucket Bucket) error {
 	if err := ctx.Err(); err != nil {
 		return err

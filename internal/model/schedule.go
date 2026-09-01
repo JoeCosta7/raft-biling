@@ -94,7 +94,6 @@ type Schedule struct {
 	Timezone         string            `json:"timezone"`
 	MaxAttempts      int               `json:"max_attempts"`
 	RetryBackoff     RetryBackoff      `json:"retry_backoff"`
-	ExecutionTimeout time.Duration     `json:"execution_timeout"`
 	CatchUpPolicy    CatchUpPolicy     `json:"catch_up_policy"`
 	Status           ScheduleStatus    `json:"status"`
 	NextRunAt        *time.Time        `json:"next_run_at"`
