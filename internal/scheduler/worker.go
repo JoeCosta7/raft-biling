@@ -32,9 +32,6 @@ const (
 // proposeTimeout bounds how long a single recovery-driven Propose call waits.
 const proposeTimeout = 5 * time.Second
 
-// TODO httpClientTimeout value needs to be figured out
-const httpClientTimeout = 30 * time.Second
-
 // TODO defaultPoolSize value needs to be figured out
 const defaultPoolSize = 8
 
@@ -143,7 +140,7 @@ func NewWorker(reader Reader, proposer Proposer, logger *slog.Logger) *Worker {
 		nodeID:       proposer.ID(),
 		logger:       logger,
 		taskCh:       make(chan Task, 256),
-		httpClient:   &http.Client{Timeout: httpClientTimeout},
+		httpClient:   &http.Client{},
 		tickInterval: defaultTickInterval,
 		poolSize:     defaultPoolSize,
 	}
@@ -212,7 +209,13 @@ func (t *freshFireTask) run(ctx context.Context) error {
 	attemptID := ulid.Make().String()
 	startedAt := time.Now()
 	body := t.schedule.Payload
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.schedule.CallbackURL, bytes.NewReader(body))
+	callTimeout := t.schedule.CallTimeout
+	if callTimeout <= 0 {
+		callTimeout = model.DefaultCallTimeout
+	}
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, t.schedule.CallbackURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request for execution %s: %w", execID, err)
 	}
@@ -411,7 +414,13 @@ func (t *inFlightTask) runRetry(ctx context.Context, execID string) error {
 	attemptID := ulid.Make().String()
 	startedAt := time.Now()
 	body := t.schedule.Payload
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.schedule.CallbackURL, bytes.NewReader(body))
+	callTimeout := t.schedule.CallTimeout
+	if callTimeout <= 0 {
+		callTimeout = model.DefaultCallTimeout
+	}
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, t.schedule.CallbackURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request for execution %s: %w", execID, err)
 	}

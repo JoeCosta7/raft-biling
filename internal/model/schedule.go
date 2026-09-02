@@ -10,6 +10,8 @@ type ScheduleType string
 
 var CurrentScheduleSchemaVersion = 1
 
+const DefaultCallTimeout = 30 * time.Second
+
 const (
 	ScheduleTypeOnce      ScheduleType = "once"
 	ScheduleTypeRecurring ScheduleType = "recurring"
@@ -79,22 +81,23 @@ func (rb RetryBackoff) DelayForAttempt(attemptNumber int) time.Duration {
 }
 
 type Schedule struct {
-	SchemaVersion    int               `json:"schema_version"`
-	ID               string            `json:"id"`
-	TenantID         string            `json:"tenant_id"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
-	CreatedBy        string            `json:"created_by,omitempty"`
-	CallbackURL      string            `json:"callback_url"`
-	Payload          json.RawMessage   `json:"payload"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	ScheduleType     ScheduleType      `json:"schedule_type"`
-	FirstRunAt       time.Time         `json:"first_run_at"`
-	Recurrence       *Recurrence       `json:"recurrence"`
-	Timezone         string            `json:"timezone"`
-	MaxAttempts      int               `json:"max_attempts"`
-	RetryBackoff     RetryBackoff      `json:"retry_backoff"`
-	CatchUpPolicy    CatchUpPolicy     `json:"catch_up_policy"`
-	Status           ScheduleStatus    `json:"status"`
-	NextRunAt        *time.Time        `json:"next_run_at"`
+	SchemaVersion int               `json:"schema_version"`
+	ID            string            `json:"id"`
+	TenantID      string            `json:"tenant_id"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	CreatedBy     string            `json:"created_by,omitempty"`
+	CallbackURL   string            `json:"callback_url"`
+	Payload       json.RawMessage   `json:"payload"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	ScheduleType  ScheduleType      `json:"schedule_type"`
+	FirstRunAt    time.Time         `json:"first_run_at"`
+	Recurrence    *Recurrence       `json:"recurrence"`
+	Timezone      string            `json:"timezone"`
+	MaxAttempts   int               `json:"max_attempts"`
+	RetryBackoff  RetryBackoff      `json:"retry_backoff"`
+	CallTimeout   time.Duration     `json:"call_timeout"`
+	CatchUpPolicy CatchUpPolicy     `json:"catch_up_policy"`
+	Status        ScheduleStatus    `json:"status"`
+	NextRunAt     *time.Time        `json:"next_run_at"`
 }

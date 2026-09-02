@@ -44,6 +44,7 @@ func newTestCreateScheduleCommand(overrides ...func(c *CreateScheduleCommand)) *
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
+		CallTimeout:   5 * time.Second,
 		CatchUpPolicy: model.CatchUpPolicyAll,
 	}
 	for _, o := range overrides {
@@ -54,13 +55,14 @@ func newTestCreateScheduleCommand(overrides ...func(c *CreateScheduleCommand)) *
 
 func newTestUpdateScheduleCommand(overrides ...func(*UpdateScheduleCommand)) *UpdateScheduleCommand {
 	cmd := &UpdateScheduleCommand{
-		TenantID:         testTenantID,
-		ID:               testScheduleID,
-		CallbackURL:      nil,
-		Headers:          nil,
-		Payload:          nil,
+		TenantID:     testTenantID,
+		ID:           testScheduleID,
+		CallbackURL:  nil,
+		Headers:      nil,
+		Payload:      nil,
 		RetryBackoff: nil,
 		MaxAttempts:  nil,
+		CallTimeout:  nil,
 	}
 	for _, o := range overrides {
 		o(cmd)
@@ -161,6 +163,31 @@ func TestApplyCreateSchedule_RecurringHappyPath(t *testing.T) {
 	}
 	if !schedule.NextRunAt.Equal(cmd.FirstRunAt) {
 		t.Error("NextRunAt not set correctly")
+	}
+}
+
+func TestApplyCreateSchedule_DefaultsCallTimeout(t *testing.T) {
+	tx := newFakeTx()
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = 0 })
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if err != nil {
+		t.Fatalf("ApplyCreateSchedule: unexpected error: %v", err)
+	}
+	if schedule.CallTimeout != model.DefaultCallTimeout {
+		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, model.DefaultCallTimeout)
+	}
+}
+
+func TestApplyCreateSchedule_PreservesExplicitCallTimeout(t *testing.T) {
+	tx := newFakeTx()
+	want := 10 * time.Second
+	cmd := newTestCreateScheduleCommand(func(c *CreateScheduleCommand) { c.CallTimeout = want })
+	schedule, err := ApplyCreateSchedule(tx, *cmd, testTime)
+	if err != nil {
+		t.Fatalf("ApplyCreateSchedule: unexpected error: %v", err)
+	}
+	if schedule.CallTimeout != want {
+		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, want)
 	}
 }
 
@@ -301,6 +328,9 @@ func TestApplyUpdateSchedule_HappyPathOneField(t *testing.T) {
 	if schedule.MaxAttempts != preSeed.MaxAttempts {
 		t.Errorf("MaxAttempts: got %d, want %d", schedule.MaxAttempts, preSeed.MaxAttempts)
 	}
+	if schedule.CallTimeout != preSeed.CallTimeout {
+		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, preSeed.CallTimeout)
+	}
 	if !schedule.UpdatedAt.Equal(proposedAt) {
 		t.Errorf("UpdatedAt: got %v, want %v", schedule.UpdatedAt, proposedAt)
 	}
@@ -315,6 +345,22 @@ func TestApplyUpdateSchedule_HappyPathOneField(t *testing.T) {
 	}
 	if stored.CallbackURL != newURL {
 		t.Errorf("stored.CallbackURL: got %q, want %q", stored.CallbackURL, newURL)
+	}
+}
+
+func TestApplyUpdateSchedule_UpdatesCallTimeout(t *testing.T) {
+	tx := newFakeTx()
+	preSeed := newTestSchedule()
+	seedSchedule(tx, preSeed)
+	want := 45 * time.Second
+	cmd := newTestUpdateScheduleCommand(func(c *UpdateScheduleCommand) { c.CallTimeout = durationPtr(want) })
+	proposedAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	schedule, err := ApplyUpdateSchedule(tx, *cmd, proposedAt)
+	if err != nil {
+		t.Fatalf("ApplyUpdateSchedule: unexpected error: %v", err)
+	}
+	if schedule.CallTimeout != want {
+		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, want)
 	}
 }
 
@@ -345,6 +391,9 @@ func TestApplyUpdateSchedule_HappyPathNoFields(t *testing.T) {
 	}
 	if schedule.MaxAttempts != preSeed.MaxAttempts {
 		t.Errorf("MaxAttempts: got %d, want %d", schedule.MaxAttempts, preSeed.MaxAttempts)
+	}
+	if schedule.CallTimeout != preSeed.CallTimeout {
+		t.Errorf("CallTimeout: got %v, want %v", schedule.CallTimeout, preSeed.CallTimeout)
 	}
 	if !schedule.UpdatedAt.Equal(proposedAt) {
 		t.Errorf("UpdatedAt: got %v, want %v", schedule.UpdatedAt, proposedAt)

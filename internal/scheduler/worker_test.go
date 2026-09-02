@@ -842,3 +842,127 @@ func TestInFlightTask_RunRetry_DoErrCanceled_SkipsProposal(t *testing.T) {
 		t.Errorf("calls: got %d, want 0 — canceled dispatch must not propose anything", len(proposer.calls))
 	}
 }
+
+func TestFreshFireTask_Run_CallTimeoutFires_RecordsRetry(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	proposer := newApplyingProposer(t, nodeID)
+	err := proposer.store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+		return tx.PutSchedule(&model.Schedule{
+			TenantID:    tenantID,
+			ID:          scheduleID,
+			Status:      model.ScheduleStatusActive,
+			CallbackURL: server.URL,
+			Payload:     []byte("{}"),
+			MaxAttempts: 3,
+			CallTimeout: 10 * time.Millisecond,
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	task := &freshFireTask{
+		exec: model.Execution{
+			TenantID:   tenantID,
+			ID:         execID,
+			ScheduleID: scheduleID,
+		},
+		nodeID:     nodeID,
+		reader:     &boltReader{store: proposer.store},
+		proposer:   proposer,
+		httpClient: &http.Client{},
+		logger:     slog.New(slog.DiscardHandler),
+	}
+
+	if err := task.run(context.Background()); err != nil {
+		t.Fatalf("run: unexpected error: %v", err)
+	}
+
+	if len(proposer.calls) != 1 {
+		t.Fatalf("calls: got %d, want 1 (record_attempt only, no complete): %+v", len(proposer.calls), proposer.calls)
+	}
+	recordCmd, ok := proposer.calls[0].cmd.(command.RecordAttemptCommand)
+	if !ok {
+		t.Fatalf("calls[0].cmd: got %T, want command.RecordAttemptCommand", proposer.calls[0].cmd)
+	}
+	if recordCmd.Outcome != model.OutcomeRetry {
+		t.Errorf("Outcome: got %q, want %q — CallTimeout firing must be a real, retryable attempt outcome, not silently dropped", recordCmd.Outcome, model.OutcomeRetry)
+	}
+}
+
+func TestFreshFireTask_Run_ZeroCallTimeout_FallsBackToDefault(t *testing.T) {
+	const (
+		tenantID   = "tenant-1"
+		scheduleID = "sched-1"
+		execID     = "exec-1"
+		nodeID     = "test-node"
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	proposer := newApplyingProposer(t, nodeID)
+	err := proposer.store.Update(func(tx storage.Tx) error {
+		if err := tx.PutTenant(&model.Tenant{ID: tenantID}); err != nil {
+			return err
+		}
+		return tx.PutSchedule(&model.Schedule{
+			TenantID:    tenantID,
+			ID:          scheduleID,
+			Status:      model.ScheduleStatusActive,
+			CallbackURL: server.URL,
+			Payload:     []byte("{}"),
+			MaxAttempts: 3,
+			// CallTimeout intentionally left zero — simulates a schedule persisted
+			// before this field existed.
+		})
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	task := &freshFireTask{
+		exec: model.Execution{
+			TenantID:   tenantID,
+			ID:         execID,
+			ScheduleID: scheduleID,
+		},
+		nodeID:     nodeID,
+		reader:     &boltReader{store: proposer.store},
+		proposer:   proposer,
+		httpClient: &http.Client{},
+		logger:     slog.New(slog.DiscardHandler),
+	}
+
+	if err := task.run(context.Background()); err != nil {
+		t.Fatalf("run: unexpected error: %v", err)
+	}
+
+	if len(proposer.calls) != 2 {
+		t.Fatalf("calls: got %d, want 2 (record_attempt + complete_execution): %+v", len(proposer.calls), proposer.calls)
+	}
+	recordCmd, ok := proposer.calls[0].cmd.(command.RecordAttemptCommand)
+	if !ok {
+		t.Fatalf("calls[0].cmd: got %T, want command.RecordAttemptCommand", proposer.calls[0].cmd)
+	}
+	if recordCmd.Outcome != model.OutcomeSuccess {
+		t.Errorf("Outcome: got %q, want %q — a zero CallTimeout must fall back to the default, not fail instantly", recordCmd.Outcome, model.OutcomeSuccess)
+	}
+}

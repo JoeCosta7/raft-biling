@@ -21,6 +21,7 @@ type CreateScheduleCommand struct {
 	Timezone         string              `json:"timezone"`
 	MaxAttempts      int                 `json:"max_attempts"`
 	RetryBackoff     model.RetryBackoff  `json:"retry_backoff"`
+	CallTimeout      time.Duration       `json:"call_timeout"`
 	CatchUpPolicy    model.CatchUpPolicy `json:"catch_up_policy"`
 }
 
@@ -32,6 +33,7 @@ type UpdateScheduleCommand struct {
 	Payload          *json.RawMessage
 	RetryBackoff     *model.RetryBackoff
 	MaxAttempts      *int
+	CallTimeout      *time.Duration
 }
 
 type PauseScheduleCommand struct {
@@ -75,6 +77,10 @@ func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt ti
 		}
 		nextRun = nr
 	}
+	callTimeout := cmd.CallTimeout
+	if callTimeout <= 0 {
+		callTimeout = model.DefaultCallTimeout
+	}
 	schedule := model.Schedule{
 		SchemaVersion:    model.CurrentScheduleSchemaVersion,
 		ID:               cmd.ID,
@@ -91,6 +97,7 @@ func ApplyCreateSchedule(tx storage.Tx, cmd CreateScheduleCommand, proposedAt ti
 		Timezone:         cmd.Timezone,
 		MaxAttempts:      cmd.MaxAttempts,
 		RetryBackoff:     cmd.RetryBackoff,
+		CallTimeout:      callTimeout,
 		CatchUpPolicy:    cmd.CatchUpPolicy,
 		Status:           model.ScheduleStatusActive,
 		NextRunAt:        nextRun,
@@ -133,6 +140,9 @@ func ApplyUpdateSchedule(tx storage.Tx, cmd UpdateScheduleCommand, proposedAt ti
 	}
 	if cmd.MaxAttempts != nil {
 		updated.MaxAttempts = *cmd.MaxAttempts
+	}
+	if cmd.CallTimeout != nil {
+		updated.CallTimeout = *cmd.CallTimeout
 	}
 	updated.UpdatedAt = proposedAt
 	if err := tx.PutSchedule(&updated); err != nil {

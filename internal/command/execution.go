@@ -192,7 +192,7 @@ func ApplyRecordAttempt(tx storage.Tx, cmd RecordAttemptCommand, proposedAt time
 	if cmd.RequestURL == "" {
 		return nil, &CommandError{Kind: KindValidation, Field: "request_url", Message: "request_url is missing"}
 	}
-	if cmd.ResponseStatus == 0 {
+	if cmd.Outcome == model.OutcomeSuccess && cmd.ResponseStatus == 0 {
 		return nil, &CommandError{Kind: KindValidation, Field: "response_status", Message: "response_status is missing"}
 	}
 	exec, err := tx.GetExecution(cmd.TenantID, cmd.ExecutionID)

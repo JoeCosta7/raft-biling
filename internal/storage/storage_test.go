@@ -67,6 +67,7 @@ func newTestSchedule(overrides ...func(*model.Schedule)) *model.Schedule {
 			Multiplier: 2.0,
 			Max:        1 * time.Hour,
 		},
+		CallTimeout:   5 * time.Second,
 		CatchUpPolicy: model.CatchUpPolicyAll,
 		Status:        model.ScheduleStatusActive,
 		NextRunAt:     &testTime,
